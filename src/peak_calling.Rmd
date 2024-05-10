@@ -1,0 +1,83 @@
+---
+title: "R Notebook"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r Load libraries}
+library(Seurat)
+library(Signac)
+library(tidyverse)
+```
+
+```{r Peak calling}
+pbmc.ln.raw <- readRDS('pbmc.ln.multiome.rds')
+
+pbmc.ln.raw <- subset(x = pbmc.ln.raw,
+  subset = nCount_ATAC < 70000 &
+    nCount_ATAC > 1000 &
+    nCount_RNA < 25000 &
+    nCount_RNA > 500 &
+    nFeature_RNA > 300 &
+    percent.mt < 25 &
+    nucleosome_signal < 2 &
+    TSS.enrichment > 2 &
+    pct_reads_in_peaks > 20
+)
+
+DefaultAssay(pbmc.ln.raw) <- "ATAC"
+
+#Change location of 'fragments' in multiome Seurat file
+Fragments(pbmc.ln.raw@assays$ATAC) <- NULL
+fragments <- CreateFragmentObject(path = "atac_fragments.tsv.gz", 
+                                  cells = colnames(pbmc.ln.raw), 
+                                  validate.fragments = TRUE)
+Fragments(pbmc.ln.raw@assays$ATAC) <- fragments
+
+# Call peaks using MACS2
+#options(future.globals.maxSize = 50 * 1024 ^ 3)
+#plan("multisession", workers = 15)
+peaks <- CallPeaks(pbmc.ln.raw, macs2.path = '/home/ftencat/anaconda3/bin/macs2')
+
+# Remove peaks on nonstandard chromosomes and in genomic blacklist regions
+library(GenomeInfoDb)
+peaks <- keepStandardChromosomes(peaks, pruning.mode = "coarse")
+#peaks <- subsetByOverlaps(x = peaks, ranges = blacklist_hg38_unified, invert = TRUE)
+
+# Save peaks file
+dir.create("peaks")
+save(peaks, file = "peaks/peaks.RData")
+
+# Quantify counts in each peak
+macs2_counts <- FeatureMatrix(
+  fragments = Fragments(pbmc.ln.raw),
+  features = peaks,
+  cells = colnames(pbmc.ln.raw)
+)
+
+#library(EnsDb.Hsapiens.v86)
+#annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+#seqlevelsStyle(annotations) <- 'UCSC'
+#genome(annotations) <- "hg38"
+
+library(AnnotationHub)
+ah <- AnnotationHub()
+qr <- query(ah, c("EnsDb", "mulatta", "109"))
+edb <- qr[[1]]
+annotations <- GetGRangesFromEnsDb(ensdb = edb)
+seqlevelsStyle(annotations) <- 'NCBI'
+genome(annotations) <- "Mmul_10"
+
+fragpath = "atac_fragments.tsv.gz"
+
+# Create a new assay using the MACS2 peak set and add it to the pbmc object
+pbmc.ln.raw[["peaks"]] <- CreateChromatinAssay(
+  counts = macs2_counts,
+  fragments = fragpath,
+  annotation = annotations
+)
+
+#pbmc.ln.raw[['ATAC']] <- NULL
+saveRDS(pbmc.ln.raw, 'pbmc.ln.multiome.peak.recalling.rds')
+```
+

@@ -1,0 +1,669 @@
+---
+title: "Dual blockade IL-10 / PD1 SIV - Linear regression - Flow cytometry + Cytokine features"
+author: "ten-Caten, Felipe - ftencat@emory.edu"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r Load libraries}
+library(tidyverse)
+library(rstatix)
+```
+
+```{r Linear regression}
+data <- read_tsv('data/processed/raw_data_all_timepoints_flowcytometry_cytokines_nofilter.tsv') %>% 
+  filter(!grepl('Log_', parameter, ignore.case = T)) %>% 
+  group_by(parameter, `WkPost-TX`) %>% 
+  filter(sum(value < 0) <= n()/3)  %>% 
+  mutate(value = log1p(value)) %>% 
+  ungroup()
+
+wk <- unique(data$`WkPost-TX`)
+
+df.out <- data.frame(parameter = NA, `ref.group` = NA, term = NA, estimate = NA, 
+                     `std.error` = NA, statistic = NA, `p.value` = NA , 
+                     `p.value.adj` = NA, `WkPost.TX` = NA)
+
+for(i in wk) {
+  df <- data %>%  
+    mutate(year = factor(year)) %>% 
+    filter(!is.na(value)) %>% 
+    filter(`WkPost-TX` == i) %>% # Filter per week
+    dplyr::select(-c(animal, `A*01Status`, `WkPost-TX`, `WkPost-ATI`)) %>% 
+    dplyr::mutate(group = factor(group)) %>% 
+    dplyr::mutate(group = fct_relevel(group, 'aIL10+aPD1'))
+  
+  df.stat <- df %>%
+    group_by(parameter, group) %>%
+    filter(length(unique(year)) > 1) %>% 
+    group_by(parameter) %>% 
+    filter(length(unique(group)) > 1) %>%  
+    nest(data = c(group, year, value)) %>% 
+    mutate(model = map(data, ~lm(value ~ group + year, data = .)),
+           tidied = map(model, tidy)) %>% 
+    unnest(tidied) %>% 
+    group_by(parameter) %>% 
+    adjust_pvalue(p.col = 'p.value')
+  
+  df.stat.signif <- df.stat %>%
+    dplyr::filter(term %in% c('groupaIL10', 'groupControl')) %>%
+    mutate(`WkPost.TX` = i, `ref.group` = 'aIL10+aPD1') %>%
+    dplyr::select(parameter, `ref.group`, term, estimate, `std.error`, 
+                  statistic, `p.value`, `p.value.adj`, `WkPost.TX`)
+  
+  # Ctrl as reference
+  df.control <- df %>%
+    dplyr::mutate(group = fct_relevel(group, 'Control'))
+  
+  df.control.stat <- df.control %>%
+    group_by(parameter, group) %>%
+    filter(length(unique(year)) > 1) %>% 
+    group_by(parameter) %>% 
+    filter(length(unique(group)) > 1) %>%  
+    nest(data = c(group, year, value)) %>% 
+    mutate(model = map(data, ~lm(value ~ group + year, data = .)),
+           tidied = map(model, tidy)) %>% 
+    unnest(tidied) %>% 
+    group_by(parameter) %>% 
+    adjust_pvalue(p.col = 'p.value')
+  
+  df.control.stat.signif <- df.control.stat %>%
+    dplyr::filter(term %in% c('groupaIL10')) %>%
+    mutate(`WkPost.TX` = i, `ref.group` = 'Control') %>%
+    dplyr::select(parameter,`ref.group`, term, estimate, `std.error`, 
+                          statistic, `p.value`, `p.value.adj`, `WkPost.TX`)
+    
+  df.out <- rbind(df.out, df.stat.signif, df.control.stat.signif)
+}
+
+#write_tsv(df.out %>% filter(!is.na(df.out$parameter)), 
+#          'results/linear_regression_group_comparison.tsv')
+#df.out <- read_tsv('results/linear_regression_group_comparison.tsv')
+
+signif.features <- df.out %>% 
+  filter(WkPost.TX %in% c(12, 21, 36), ref.group == 'aIL10+aPD1', 
+         p.value.adj < 0.05) %>% 
+  mutate(features = paste0('wk', WkPost.TX, '_', parameter))
+
+treg <- signif.features |> 
+  filter(WkPost.TX %in% c(12,21,36)) |> 
+  #filter(grepl('(SATB1|GARP|FOXP3|CD39|CD25|LAG3|CD49b|Tr1|CD127)', parameter, ignore.case=T))
+  filter(grepl('CD39', parameter, ignore.case=T))
+
+### Boxplots
+library(ggprism)
+library(ggpubr)
+
+modulated.feat <- df.out <- read_tsv('results/linear_regression_group_comparison.tsv') %>% 
+  mutate(feature = paste0('wk', WkPost.TX, '_', parameter))
+
+df <- read_tsv('data/raw/flow_raw_values_all_features.tsv') %>% 
+  mutate(group = factor(group, levels = c('Control', 'aIL10', 'aIL10+aPD1')))
+
+df.out <- read_tsv('results/linear_regression_group_comparison.tsv')
+
+fs <- c('wk12_8_pSTAT_CD3p_PBMC', 'wk12_2_pSTAT_CD3p_PBMC',
+        'wk12_PBMC_CD3n_CD4pCD16nClassicMono_MFI_pIRF3',
+        'wk12_PBMC_CD3n_CD4pCD16pMono_PSTAT3p_MFI_PSTAT3')
+
+modulated.feat.p.adj.signif <- modulated.feat %>%
+  filter(feature %in% fs) |> 
+  select(feature, `ref.group`, term, p.value.adj) %>% 
+  rename(group1 = `ref.group`, group2 = term, p.adj = p.value.adj) %>% 
+  mutate(group2 = gsub('group', '', group2)) %>% 
+  mutate(p.adj.signif = case_when(p.adj > 0.05 ~ 'ns',
+                                  p.adj <= 0.05 & p.adj > 0.01 ~ '*',
+                                  p.adj <= 0.01 & p.adj > 0.001 ~ '**',
+                                  p.adj <= 0.001  ~ '***'))
+
+modulated.feat.p.adj.signif.stat <- modulated.feat.p.adj.signif %>% 
+  left_join(df %>% 
+              filter(feature %in% fs) %>%  
+              group_by(feature) %>% 
+              slice_max(value, with_ties = F) %>% 
+              select(feature, value)) %>% 
+  mutate(value = ifelse(p.adj.signif == 'ns', NA, value))
+
+df.boxplot <- df %>% 
+  mutate(unit = paste0(unit, '\n')) %>% 
+  mutate(ylabel = paste0(newname,' ', unit, timepoint, ' - ', tissue)) |> 
+  mutate(ylabel = case_when(feature == 'wk12_8_pSTAT_CD3p_PBMC' ~ 'CD8+ pSTAT1p %\nWeek 0 Post-ATI - PBMC',
+                            feature == 'wk12_2_pSTAT_CD3p_PBMC' ~ 'CD4 TCM IRF7p %\nWeek 0 Post-ATI - PBMC',
+                            feature == 'wk12_PBMC_CD3n_CD4pCD16nClassicMono_MFI_pIRF3' ~ 'CD14pCD16nClassicMono MFI pIRF3\nWeek 0 Post-ATI - PBMC',
+                            feature == 'wk12_PBMC_CD3n_CD4pCD16pMono_PSTAT3p_MFI_PSTAT3' ~ 'CD14pCD16pMono PSTAT3p MFI PSTAT3\nWeek 0 Post-ATI - PBMC'))
+
+boxplot.list <- list()
+for (i in 1:length(fs)) {
+  boxplot.list[[i]] <- df.boxplot %>% 
+    filter(feature %in% fs[i]) %>% 
+    ggplot(aes(x = group, y = value)) +
+    geom_boxplot(aes(fill = group), alpha = 0.7, outlier.shape = NA) +
+    geom_jitter(aes(fill = group), width = 0.05,  shape = 21, size = 3) +
+    geom_bracket(
+      aes(xmin = group1, xmax = group2, label = p.adj.signif, 
+          y.position = value + value*0.05),
+      step.increase = 0.1, label.size = 10, 
+      fontface = 'bold', vjust = 0.6,
+      data = modulated.feat.p.adj.signif.stat %>% 
+        filter(feature %in% fs[i])) +
+    scale_fill_manual(values = c("black", "red", "blue")) +
+    theme_prism() +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+          axis.title.y = element_text(size = 12))+
+    ylab(df.boxplot %>% filter(feature %in% fs[i]) %>% 
+                 select(ylabel) %>% unique()) +
+    xlab('') 
+}
+names(boxplot.list) <- fs
+
+## Save plots
+boxplot_path  <- 'results/figures/new/boxplots_feature_selection/'
+lapply(names(boxplot.list), 
+       function(x) ggsave(paste0(boxplot_path, x, '.pdf'), 
+                          plot = boxplot.list[[x]], width = 3, 
+                          height = 5.5, bg = 'white', device = 'pdf'))
+
+
+```
+
+```{r Correlation}
+# Viral readouts at wk 24 Post-ATI
+viral.ro <- read_tsv('data/raw/viral_readouts_wk24_postati.tsv')
+
+viral.ro <- viral.ro %>% 
+  select(animal, log_VL, `LOG_SIV/DNA_LN_per10^6correctedCD4Live`,
+         `LOG_SIVRNA_LN_per10^6correctedCD4Live`, 
+         `Total Proviruses Detected_Count Per Million CD4 live cells_LN`,
+         `2LTR Circles_Count Per Million CD4 live cells_LN`)
+
+colnames(viral.ro) = c('animal', paste0('viral_readout_', colnames(viral.ro)[-1]))
+
+# Flow cytometry features modulated by combo treatment
+df.out <- read_tsv('results/linear_regression_group_comparison.tsv')
+
+signif.features <- df.out %>% 
+  filter(WkPost.TX %in% c(12, 21, 36), ref.group == 'aIL10+aPD1', 
+         p.value.adj < 0.05) %>% 
+  mutate(features = paste0('wk', WkPost.TX, '_', parameter))
+
+data <- read_tsv('data/processed/raw_data_all_timepoints_flowcytometry_cytokines_nofilter.tsv') %>% 
+  group_by(parameter, `WkPost-TX`) %>% 
+  filter(sum(value < 0) <= n()/3)  %>% 
+  ungroup()
+
+modulated.features.data <- data %>% 
+  mutate(features = paste0('wk', `WkPost-TX`, '_', parameter)) %>% 
+  filter(features %in% signif.features$features) %>%
+  select(animal, group, features, value) %>%
+  unique() %>%  
+  filter(!(features %in% c('wk12_PBMC_CD3p_CD8p', 'wk21_PBMC_CD3p_CD4p', 
+                           'wk36_PBMC_CD3p_CD4p'))) %>% 
+  pivot_wider(names_from = 'features', values_from = 'value')  %>% 
+  left_join(viral.ro)
+  
+
+modulated.features.cor <- modulated.features.data %>% 
+  select(-c(animal, group)) %>% 
+  cor_test(vars = starts_with('viral_readout_'), 
+           vars2 = !starts_with('viral_readout_'), 
+           method = 'spearman') %>% 
+  adjust_pvalue(p.col = 'p', method = 'fdr')
+
+#write_tsv(modulated.features.cor, 
+#          'results/spearman_correlation_all_modulated_features_vs_readouts.tsv')
+
+signif.correlated.features <- modulated.features.cor %>%
+  filter(p.adj < 0.1, grepl('(IRF3|IRF7|STAT)', var2))
+
+signif.correlated.features.data  <- modulated.features.data %>% 
+  select(animal, all_of(signif.correlated.features$var2))
+
+#write_tsv(signif.correlated.features.data, 
+#          'results/flow_features_STAT_IRF_modulated_by_combo_correl_viral_readouts.tsv')
+
+signif.correlated.features.data <- modulated.features.data %>% 
+  select(animal, group, starts_with('viral_readout'), 
+         all_of(signif.correlated.features$var2)) %>% 
+  filter(!is.na(viral_readout_log_VL)) %>% 
+  column_to_rownames('animal') %>% 
+  mutate(`viral_readout_2LTR Circles_Count Per Million CD4 live cells_LN` =
+           log10(`viral_readout_2LTR Circles_Count Per Million CD4 live cells_LN`),
+         `viral_readout_Total Proviruses Detected_Count Per Million CD4 live cells_LN`=
+         log10(`viral_readout_Total Proviruses Detected_Count Per Million CD4 live cells_LN`)) %>% 
+  rename(`Log VL (cps/mL)` = `viral_readout_log_VL`,
+        `Log CA-vRNA - LN`= `viral_readout_LOG_SIVRNA_LN_per10^6correctedCD4Live`,
+        `Log CA-vDNA - LN` = `viral_readout_LOG_SIV/DNA_LN_per10^6correctedCD4Live`,
+         `Log 2LTR - LN` = `viral_readout_2LTR Circles_Count Per Million CD4 live cells_LN`,
+         `Log IPDA - LN` =  `viral_readout_Total Proviruses Detected_Count Per Million CD4 live cells_LN`) %>% 
+  arrange(`Log CA-vRNA - LN`) 
+
+## Complex heatmap
+library(ComplexHeatmap)
+library(circlize)
+m <- t(scale(log1p(signif.correlated.features.data[,-c(1:6)])))
+
+rowdata <- rownames(m) %>% 
+  enframe %>% 
+  mutate(week.post.ati = case_when(grepl('wk12', value) ~ 'Wk0',
+                                   grepl('wk21', value) ~ 'Wk9',
+                                   grepl('wk36', value) ~ 'Wk24'),
+         rename = case_when(grepl('16_pSTAT_CD3n_LN', value) ~ 'patrolling monocytes  pSTAT1p IRF7dim IRF3dim',
+                           grepl('8_pSTAT_CD3n_LN', value) ~ 'CD3n pSTAT5',
+                           grepl('7_pSTAT_CD3n_LN', value) ~ 'CD3n pSTAT1 IRF7dim',
+                           grepl('11_pSTAT_CD3n_LN', value) ~ 'CD3n pIRF7dim',
+                           grepl('16_pSTAT_CD3p_LN', value) ~ 'CD8p',
+                           grepl('11_pSTAT_CD3p_LN', value) ~ 'CD4p CD38+ IRF7dim',
+                           grepl('13_pSTAT_CD3p_LN', value) ~ 'CD4p TCM',
+                           grepl('3_pSTAT_CD3p_LN', value) ~ 'CD4p IRF7dim',
+                           grepl('3_pSTAT_CD3p_PBMC', value) ~ 'CD3p IRF7p',
+                           grepl('8_pSTAT_CD3p_PBMC', value) ~ 'CD8p pSTAT1p',
+                           grepl('2_pSTAT_CD3p_PBMC', value) ~ 'CD4p TCM IRF7p',
+           TRUE ~ value)) %>% 
+  mutate(week.post.ati = factor(week.post.ati, levels = c('Wk0', 'Wk9', 'Wk24')),
+         tissue = case_when(grepl('PBMC', value) ~ 'PBMC',
+                            grepl('LN', value) ~ 'LN'),
+         subset = case_when(grepl('(CD3p_CD4|CD4p )', rename) ~ 'T CD4+',
+                            grepl('(CD3p_CD8|CD8p)', rename) ~ 'T CD8+',
+                            grepl('(CD3p)', rename) ~ 'T Total',
+                               grepl('CD3n_CD4pCD16n', rename) ~ 'Monocyte',
+                               grepl('CD3n_CD4pCD16p', rename) ~ 'Monocyte',
+                               grepl('patrolling monocytes', rename) ~ 'Monocyte',
+                            grepl('(CD3n |CD3n_MFI)', rename) ~ 'NonT/NonMono',
+                            TRUE ~ NA),
+         label = case_when(subset == 'T CD8+' ~ sub('wk36_LN_CD3p_CD8_', '', rename),
+                           subset == 'T CD4+' ~ sub('.*CD3p_CD4_', '', rename),
+                           subset == 'T Total' ~ sub('wk36_LN_CD3p_MFI_', 'CD3p ', rename),
+                           subset == 'Monocyte' ~ sub('.*CD3n_CD4p', 'CD14p', rename),
+                           subset == 'NonT/NonMono' ~ sub('.*_CD3n', 'CD3n', rename))) %>% 
+  mutate(week.subset = paste0(week.post.ati, subset))  %>% 
+  mutate(week.subset = factor(week.subset, 
+                              levels = c("Wk0Monocyte", "Wk0T CD4+", "Wk0T CD8+", "Wk9Monocyte",
+                                         "Wk9NonT/NonMono", "Wk9T CD4+", "Wk9T CD8+", "Wk9T Total",
+                                         "Wk24Monocyte", "Wk24NonT/NonMono", "Wk24T CD4+", 
+                                         "Wk24T CD8+", "Wk24T Total")))
+
+x <- signif.correlated.features %>% 
+  select(var1, var2, cor) %>% 
+  mutate(cor.class = ifelse(cor < 0, 'neg', 'pos')) %>% 
+  select(-cor) %>% 
+  pivot_wider(names_from = var1, values_from = cor.class) %>% 
+  column_to_rownames('var2') %>% 
+  rename(`VL` = `viral_readout_log_VL`,
+        `CA-vRNA`= `viral_readout_LOG_SIVRNA_LN_per10^6correctedCD4Live`,
+        `CA-vDNA` = `viral_readout_LOG_SIV/DNA_LN_per10^6correctedCD4Live`,
+         `2LTR` = `viral_readout_2LTR Circles_Count Per Million CD4 live cells_LN`,
+         `IPDA` =  `viral_readout_Total Proviruses Detected_Count Per Million CD4 live cells_LN`) %>% 
+  as.matrix()
+
+col_fun = colorRamp2(seq(0, 8, 0.1), viridis::magma(81, direction = -1))
+
+ha1 = HeatmapAnnotation(df = signif.correlated.features.data[,c(1,4)],
+                        col = list(group = c('aIL10' = 'red', 'aIL10+aPD1' = 'blue', 'Control' = 'black'),
+                                   `Log CA-vRNA - LN` = col_fun))
+
+qual.colors <- RColorBrewer::brewer.pal(9, 'Paired')
+
+subset.colors <- qual.colors[c(1,3,5,7,9)]
+tissue.colors <- qual.colors[c(8,4)]
+week.colors <- RColorBrewer::brewer.pal(3, 'YlOrBr')
+
+names(subset.colors) <- unique(rowdata$subset)
+names(tissue.colors) <- unique(rowdata$tissue)
+names(week.colors) <- c('Wk0', 'Wk9', 'Wk24')
+
+row.ha <- rowAnnotation(df = rowdata[,c("week.post.ati", "tissue", "subset")],
+                        #border = T,
+                        #annotation_name_rot = 45,
+                        annotation_name_gp= gpar(fontsize = 11),
+                        col = list(subset = subset.colors, tissue = tissue.colors,
+                                   week.post.ati = week.colors))
+
+h1 <- Heatmap(m, name = "z-score", width = unit(6, "cm"), show_column_names = F,  
+              top_annotation = ha1, 
+              cluster_columns = F, 
+              cluster_rows = F, 
+              left_annotation = row.ha, 
+              row_gap = unit(c(0,0,2,0,0,0,0,2,0,0,0,0), "mm"),
+              row_split = rowdata$week.subset,
+              row_title = NULL,
+              cluster_row_slices = F, 
+            #  border_gp = gpar(col = "black", lwd = 1))
+              rect_gp = gpar(col = "black", lwd = 0.1))
+
+colors <- qual.colors[c(2,6)]
+names(colors) <- c('neg', 'pos')
+
+h2 <- Heatmap(x, name = 'cor', width = unit(1, "cm"), cluster_columns = F,
+              col = colors, na_col = "white",
+              column_names_gp = gpar(fontsize = 6), row_names_gp = gpar(fontsize = 8),
+              row_labels = rowdata$label, 
+              #column_names_rot = 45,
+              #border_gp = gpar(col = "black", lwd = 1),
+              rect_gp = gpar(col = "black", lwd = 0.1))
+
+ht_list = h1 + h2
+
+draw(ht_list, heatmap_legend_side = "bottom", annotation_legend_side = "left")
+
+```
+
+```{r Plots}
+vl.p <- modulated.features.data |> 
+  ggplot(aes(x= viral_readout_log_VL, y = wk12_2_pSTAT_CD3p_PBMC)) +
+  geom_point(aes(colour = group), size = 3) +
+  geom_smooth(method = 'lm', se = F) +
+  stat_cor(aes(label = paste(paste("'rho'", ..r.., sep = "~`=`~"), 
+                             ..p.label.., sep = "~`,`~")),
+           method = 'spearman', size = 5, cor.coef.name = 'rho',
+           label.y = 42) +
+  scale_color_manual(values = c('red', 'blue'   , 'black' ), name = 'Group') +
+  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
+  xlab('Log VL (cps/mL)') +   
+  theme_prism() +
+  theme(legend.title = element_text())
+  
+ggsave('results/figures/new/scatter_plot_vl_irf7.png', vl.p, dpi = 'retina',
+       height = 3.5, width = 5.5) 
+
+vdna.p <- modulated.features.data |> 
+  ggplot(aes(x= `viral_readout_LOG_SIV/DNA_LN_per10^6correctedCD4Live`, 
+             y = wk12_2_pSTAT_CD3p_PBMC)) +
+  geom_point(aes(colour = group), size = 3) +
+  geom_smooth(method = 'lm', se = F) +
+  stat_cor(aes(label = paste(paste("'rho'", ..r.., sep = "~`=`~"), 
+                             ..p.label.., sep = "~`,`~")),
+           method = 'spearman', size = 5, cor.coef.name = 'rho',
+           label.y = 42) +
+  scale_color_manual(values = c('red', 'blue'   , 'black' ), name = 'Group') +
+  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
+  xlab('Log CA-vDNA - LN\nWeek 24 post-ATI') +   
+  theme_prism() +
+  theme(legend.title = element_text())
+  
+ggsave('results/figures/new/scatter_plot_sivdna_irf7.png', vdna.p, dpi = 'retina',
+       height = 3.5, width = 5.5)  
+
+vrna.p <- modulated.features.data |> 
+  ggplot(aes(x= `viral_readout_LOG_SIVRNA_LN_per10^6correctedCD4Live`, 
+             y = wk12_2_pSTAT_CD3p_PBMC)) +
+  geom_point(aes(colour = group), size = 3) +
+  geom_smooth(method = 'lm', se = F) +
+  stat_cor(aes(label = paste(paste("'rho'", ..r.., sep = "~`=`~"), 
+                             ..p.label.., sep = "~`,`~")),
+           method = 'spearman', size = 5, cor.coef.name = 'rho',
+           label.y = 42) +
+  scale_color_manual(values = c('red', 'blue'   , 'black' ), name = 'Group') +
+  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
+  xlab('Log CA-vRNA - LN\nWeek 24 post-ATI') +   
+  theme_prism() +
+  theme(legend.title = element_text())
+  
+ggsave('results/figures/new/scatter_plot_sivrna_irf7.png', vrna.p, dpi = 'retina',
+       height = 3.5, width = 5.5)
+
+ipda.p <- modulated.features.data |> 
+  ggplot(aes(x= `viral_readout_Total Proviruses Detected_Count Per Million CD4 live cells_LN`, 
+             y = wk12_2_pSTAT_CD3p_PBMC)) +
+  geom_point(aes(colour = group), size = 3) +
+  geom_smooth(method = 'lm', se = F) +
+  stat_cor(aes(label = paste(paste("'rho'", ..r.., sep = "~`=`~"), 
+                             ..p.label.., sep = "~`,`~")),
+           method = 'spearman', size = 5, cor.coef.name = 'rho',
+           label.y = 42) +
+  scale_color_manual(values = c('red', 'blue'   , 'black' ), name = 'Group') +
+  scale_x_continuous(transform = 'log10', 
+                     labels = c('3','4','5'),
+                     breaks = c(1e3, 1e4, 1e5))+
+  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
+  xlab('Log IPDA - LN\nWeek 24 post-ATI') +   
+  theme_prism() +
+  theme(legend.title = element_text())
+  
+ggsave('results/figures/new/scatter_plot_ipda_irf7.png', ipda.p, dpi = 'retina',
+       height = 3.5, width = 5.5)
+
+ltr.p <- modulated.features.data |> 
+  ggplot(aes(x= `viral_readout_2LTR Circles_Count Per Million CD4 live cells_LN`, 
+             y = wk12_2_pSTAT_CD3p_PBMC)) +
+  geom_point(aes(colour = group), size = 3) +
+  geom_smooth(method = 'lm', se = F) +
+  stat_cor(aes(label = paste(paste("'rho'", ..r.., sep = "~`=`~"), 
+                             ..p.label.., sep = "~`,`~")),
+           method = 'spearman', size = 5, cor.coef.name = 'rho',
+           label.y = 42) +
+  scale_color_manual(values = c('red', 'blue'   , 'black' ), name = 'Group') +
+  scale_x_continuous(transform = 'log10',
+                     labels = c('2','3','4'),
+                     breaks = c(1e2, 1e3, 1e4))+
+  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
+  xlab('Log 2LTR - LN\nWeek 24 post-ATI') +   
+  theme_prism() +
+  theme(legend.title = element_text())
+  
+ggsave('results/figures/new/scatter_plot_2ltr_irf7.png', ltr.p, dpi = 'retina',
+       height = 3.5, width = 5.5)
+
+
+```
+
+```{r Raw value all features flow cytometry}
+data <- read_excel('../dual_blockade_IL-10_PD-1_SIV/data/raw/Master_noPD1_UMAP_Manual_CLEAN.xlsx') %>% 
+  mutate(across(everything(), ~ifelse(. == "NA", NA, .))) %>% 
+  mutate(across(-c(ID_Merge, group, animal, `A*01Status`), as.double)) 
+
+exhaustion.data <- readxl::read_excel('../dual_blockade_IL-10_PD-1_SIV/data/raw/Merge_Hakeem_IRF4_TOX_code.xlsx', 
+                         na = c('NA', 'n_a'))
+
+first.gate  <- data %>% 
+  pivot_longer(-c('order':'WkPost-ATI')) %>% 
+  select(animal, group, 'WkPost-TX', name, value) %>% 
+  filter(!is.na(value)) %>% 
+  mutate(feature = paste0('wk', `WkPost-TX`, '_', name)) %>% 
+  select(-name) %>% 
+  relocate(animal, group, `WkPost-TX`,feature) %>% 
+  filter(!grepl('LN_CD3p_CD8p_Naive$', feature)) 
+
+exhaustion  <- exhaustion.data %>% 
+  select(-c(`LOG_SIV_DNA_LN_per10^6correctedCD4Live`,
+            `LOG_SIVRNA_LN_per10^6correctedCD4Live`, log_VL)) %>% 
+  pivot_longer(-c('order':'WkPost-ATI')) %>% 
+  select(animal,group, 'WkPost-TX', name, value) %>% 
+  filter(!is.na(value)) %>% 
+  mutate(feature = paste0('wk', `WkPost-TX`, '_', name)) %>% 
+  select(-name) %>% 
+  relocate(animal, group, `WkPost-TX`, feature) %>% 
+  filter(!grepl('LN_singlets_lymphs_live_CD3p_CD4p_TEM$', feature)) 
+  
+df <- first.gate %>% 
+  bind_rows(exhaustion) %>% 
+  mutate(group = factor(group, levels = c('Control', 'aIL10',
+                                          'aIL10+aPD1'))) %>% 
+  mutate(feature = gsub('_singlets_lymphs_live' ,'', feature)) %>% 
+  mutate(feature = gsub('Q[1-4]', '', feature)) %>% 
+  mutate(feature = gsub('_Exhausted_Terminal', '', feature)) %>%
+  mutate(feature = gsub('Exhausted_Terminal', '', feature)) %>% 
+  mutate(feature = gsub('_StemLike', '', feature)) %>%
+  mutate(feature = gsub('_Exhausted_Intermed', '', feature)) %>% 
+  mutate(feature = gsub('_Cytolytic_Transitory', '', feature)) %>% 
+  mutate(name = gsub('_', ' ', feature)) %>% 
+  mutate(name = gsub('MFI', '', name)) %>% 
+  mutate(name = case_when(grepl('wk-1', name) ~ sub('wk-1', 'Wk-13 Post-ATI', name),
+                          grepl('wk7', name) ~ sub('wk7', 'Wk-5 Post-ATI', name),
+                          grepl('wk12', name) ~ sub('wk12', 'Wk0 Post-ATI', name),
+                          grepl('wk21', name) ~ sub('wk21', 'Wk9 Post-ATI', name),
+                          grepl('wk36', name) ~ sub('wk36', 'Wk24 Post-ATI', name))) %>% 
+  mutate(tissue = ifelse(grepl('PBMC', name), 'PBMC', 'LN')) %>% 
+  mutate(timepoint = sub('ATI.*', 'ATI', name)) %>% 
+  mutate(timepoint = sub('Wk', 'Week ', timepoint)) %>% 
+  mutate(newname = sub(' LN ', '', name)) %>% 
+  mutate(newname = sub(' PBMC ', '', newname)) %>% 
+  mutate(newname = sub('.*ATI', '', newname))  %>% 
+  mutate(parameter = sub('.*?_', '', feature)) %>% 
+  mutate(unit = case_when(grepl('MSD_Cluster', feature) ~ 'centroid score',
+                          grepl('SIVRNA', feature) ~ NA_character_,
+                          grepl('MFI', feature) ~ 'MFI',
+                          !grepl('MFI', feature) &   
+                           (grepl('PBMC', feature) | 
+                           grepl('LN', feature)) &
+                          !grepl('GAG_UNS', feature) ~ '%',
+                          grepl('GAG_UNS', feature) ~ 'FC',
+                            TRUE ~ 'pg/ml'))
+
+#write_tsv(df, 'data/raw/flow_raw_values_all_features.tsv')
+```
+
+```{r Tregs boxplot}
+library(ggprism)
+library(ggpubr)
+
+modulated.feat <- df.out <- read_tsv('results/linear_regression_group_comparison.tsv') %>% 
+  mutate(feature = paste0('wk', WkPost.TX, '_', parameter))
+
+df <- read_tsv('data/raw/flow_raw_values_all_features.tsv') %>% 
+  mutate(group = factor(group, levels = c('Control', 'aIL10', 'aIL10+aPD1')))
+
+df.out <- read_tsv('results/linear_regression_group_comparison.tsv')
+
+treg <- df.out |> 
+  #filter(WkPost.TX %in% c(12, 21, 36), ref.group == 'aIL10+aPD1', p.value.adj < 0.05,
+  filter(WkPost.TX == 12, ref.group == 'aIL10+aPD1', p.value.adj < 0.05,
+         grepl('CD39', parameter, ignore.case=T)) |>  
+  mutate(features = paste0('wk', WkPost.TX, '_', parameter))
+
+fs <- unique(treg$features)
+
+modulated.feat.p.adj.signif <- modulated.feat %>%
+  filter(feature %in% fs) %>% 
+  select(feature, `ref.group`, term, p.value.adj) %>% 
+  rename(group1 = `ref.group`, group2 = term, p.adj = p.value.adj) %>% 
+  mutate(group2 = gsub('group', '', group2)) %>% 
+  mutate(p.adj.signif = case_when(p.adj > 0.05 ~ 'ns',
+                                  p.adj <= 0.05 & p.adj > 0.01 ~ '*',
+                                  p.adj <= 0.01 & p.adj > 0.001 ~ '**',
+                                  p.adj <= 0.001  ~ '***'))
+
+modulated.feat.p.adj.signif.stat <- modulated.feat.p.adj.signif %>% 
+  left_join(df %>% 
+              filter(feature %in% fs) %>%  
+              group_by(feature) %>% 
+              slice_max(value, with_ties = F) %>% 
+              select(feature, value)) %>% 
+  mutate(value = ifelse(p.adj.signif == 'ns', NA, value))
+
+df.boxplot <- df %>% 
+  mutate(unit = paste0(unit, '\n')) %>% 
+  mutate(ylabel = paste0(newname,' ', unit, timepoint, ' - ', tissue))
+
+boxplot.list <- list()
+for (i in 1:length(fs)) {
+  boxplot.list[[i]] <- df.boxplot %>% 
+    filter(feature %in% fs[i]) %>% 
+    ggplot(aes(x = group, y = value)) +
+    geom_boxplot(aes(fill = group), alpha = 0.7, outlier.shape = NA) +
+    geom_jitter(aes(fill = group), width = 0.05,  shape = 21, size = 3) +
+    geom_bracket(
+      aes(xmin = group1, xmax = group2, label = p.adj.signif, 
+          y.position = value + value*0.05),
+      step.increase = 0.1, label.size = 10, 
+      fontface = 'bold', vjust = 0.6,
+      data = modulated.feat.p.adj.signif.stat %>% 
+        filter(feature %in% fs[i])) +
+    scale_fill_manual(values = c("black", "red", "blue")) +
+    theme_prism() +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+          axis.title.y = element_text(size = 12))+
+    ylab(df.boxplot %>% filter(feature %in% fs[i]) %>% 
+                 select(ylabel) %>% unique()) +
+    xlab('') 
+}
+names(boxplot.list) <- fs
+
+cd39.plot <- bind_rows(boxplot.list$wk12_LN_CD3p_CD8p_TCM_CD39p_UNS$data[,1:5],
+          boxplot.list$wk12_LN_CD3p_CD8p_TEM_CD39p_GAG$data[,1:5],
+          boxplot.list$wk12_PBMC_CD3p_CD8p_TCF1nCD101p_GRZBnTBETp_MFI_CD39$data[,1:5]) |> 
+  arrange(feature, group, animal)
+
+write_tsv(cd39.plot, 'results/figures/new/flowdata_CD39_boxplotdata_wk12.tsv')
+
+
+## Save plots
+boxplot_path  <- 'results/figures/new/boxplots_feature_selection/'
+lapply(names(boxplot.list), 
+       function(x) ggsave(paste0(boxplot_path, x, '.pdf'), 
+                          plot = boxplot.list[[x]], width = 3, 
+                          height = 5.5, bg = 'white', device = 'pdf'))
+
+```
+
+```{r}
+viral.ro <- read_tsv('data/raw/viral_readouts_wk24_postati.tsv')
+
+viral.ro.stat <- viral.ro %>% 
+  select(animal, log_VL, `LOG_SIV/DNA_LN_per10^6correctedCD4Live`,
+         `LOG_SIVRNA_LN_per10^6correctedCD4Live`, 
+         `Total Proviruses Detected_Count Per Million CD4 live cells_LN`,
+         `2LTR Circles_Count Per Million CD4 live cells_LN`) %>% 
+  cor_test(-animal, method = 'spearman') %>% 
+  adjust_pvalue(p.col = 'p')
+```
+
+```{r Linear regression - Multiome animals}
+data <- read_tsv('data/processed/raw_data_all_timepoints_flowcytometry_cytokines_nofilter.tsv') %>% 
+  filter(!grepl('Log_', parameter, ignore.case = T)) %>% 
+  group_by(parameter, `WkPost-TX`) %>% 
+  filter(sum(value < 0) <= n()/3)  %>% 
+  mutate(value = log1p(value)) %>% 
+  ungroup() |> 
+  mutate(siv.dna.group = case_when(animal %in% c('RYm17', 'RFl17', 'RBf17') ~ 'high',
+                                   animal %in% c('RWs17', 'RRh17', 'RBv17', "RNy16") ~ 'low',
+                                   TRUE ~ NA)) |> 
+  filter(!is.na(siv.dna.group))
+
+wk <- unique(data$`WkPost-TX`)
+
+df.out <- data.frame(parameter = NA, `ref.group` = NA, term = NA, estimate = NA, 
+                     `std.error` = NA, statistic = NA, `p.value` = NA , 
+                     `p.value.adj` = NA, `WkPost.TX` = NA)
+
+for(i in wk) {
+  df <- data %>%  
+    mutate(year = factor(year)) %>% 
+    filter(!is.na(value)) %>% 
+    filter(`WkPost-TX` == i) %>% # Filter per week
+    dplyr::select(-c(animal, `A*01Status`, `WkPost-TX`, `WkPost-ATI`)) %>% 
+    dplyr::mutate(siv.dna.group = factor(siv.dna.group)) %>% 
+    dplyr::mutate(siv.dna.group = fct_relevel(siv.dna.group, 'low'))
+  
+  df.stat <- df %>%
+    group_by(parameter, siv.dna.group) %>%
+    filter(length(unique(year)) > 1) %>% 
+    group_by(parameter) %>% 
+    filter(length(unique(siv.dna.group)) > 1) %>%  
+    nest(data = c(siv.dna.group, year, value)) %>% 
+    mutate(model = map(data, ~lm(value ~ siv.dna.group + year, data = .)),
+           tidied = map(model, tidy)) %>% 
+    unnest(tidied) %>% 
+    group_by(parameter) %>% 
+    adjust_pvalue(p.col = 'p.value')
+  
+  df.stat.signif <- df.stat %>%
+    dplyr::filter(term == 'siv.dna.grouphigh') %>%
+    mutate(`WkPost.TX` = i, `ref.group` = 'low') %>%
+    dplyr::select(parameter, `ref.group`, term, estimate, `std.error`, 
+                  statistic, `p.value`, `p.value.adj`, `WkPost.TX`)
+    
+  df.out <- rbind(df.out, df.stat.signif)
+}
+
+#write_tsv(df.out %>% filter(!is.na(df.out$parameter)), 
+#          'results/linear_regression_group_comparison.tsv')
+#df.out <- read_tsv('results/linear_regression_group_comparison.tsv')
+
+signif.features.siv.dna <- df.out %>% 
+  filter(WkPost.TX %in% c(12, 21, 36), ref.group == 'low', 
+         p.value.adj < 0.05) %>% 
+  mutate(features = paste0('wk', WkPost.TX, '_', parameter))
+
+```

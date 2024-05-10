@@ -1,0 +1,3222 @@
+---
+title: "RNA-seq + ATAC-seq analysis - aIL10+aPD1"
+editor_options: 
+  chunk_output_type: console
+author: "Felipe ten Caten - ftencat@emory.edu"
+---
+
+```{r Load libraries}
+library(Seurat)
+library(Signac)
+library(tidyverse)
+library(clusterProfiler)
+
+#library(AnnotationHub)
+#
+#ah <- AnnotationHub()
+#
+#qrz <- query(ah, c( "mulatta"))
+#
+#qr <- query(ah, c("EnsDb", "mulatta", "109"))
+#edb <- qr[[1]]
+```
+
+```{r Pre-processing}
+#aggr file
+aggr <- read_csv('data/raw/multiome/aggr.csv')
+
+aggr.id <- aggr %>% 
+  mutate(barcode_id = 1:13) %>% 
+  mutate(library_id = sub('.*_', '', library_id)) %>% 
+  dplyr::select(barcode_id, library_id)
+
+# barcode metric
+barcode_metric_files <- list.files('data/raw/multiome/barcode_metrics/', 
+                                   full.names = T)
+
+meta <- read_csv(barcode_metric_files, id = "path") %>% 
+  dplyr::filter(is_cell == 1)
+
+metadata <- meta %>% 
+  mutate(path = sub('.*_', '', path)) %>% 
+  mutate(path = sub('.csv', '', path)) %>% 
+  left_join(aggr.id, by = c('path' = 'library_id')) %>% 
+  relocate(barcode_id) %>% 
+  mutate(barcode = paste0(sub('1', '', barcode), barcode_id)) %>% 
+  dplyr::select(-c(barcode_id, path)) 
+
+# the 10x hdf5 file contains both data types
+inputdata.10x <- Read10X_h5("data/raw/multiome/filtered_feature_bc_matrix.h5")
+
+# extract RNA and ATAC data
+rna_counts <- inputdata.10x$`Gene Expression`
+atac_counts <- inputdata.10x$Peaks
+
+# Create Seurat object from RNA-seq counts
+pbmc.ln <- CreateSeuratObject(counts = rna_counts, min.cells = 3)
+
+mito.genes <- c('ND1', 'ND2', 'COX1', 'COX2', 'ATP8', 'ATP6', 'COX3',
+                'ND3', 'ND4L', 'ND4', 'ND5', 'ND6', 'CYTB')
+
+pbmc.ln[["percent.mt"]] <- PercentageFeatureSet(pbmc.ln, features = mito.genes)
+
+## Add metadata
+pheno <- readxl::read_excel('data/raw/multiome/Multiome_Wetlab_data_Feb06_2023.xlsx') %>% 
+  dplyr::filter(Cohort == 'R37') %>% 
+  dplyr::select(`Sample Number`, `Sample Name`) %>% 
+  mutate(animal = gsub(' .*', '', `Sample Name`)) %>% 
+  mutate(timepoint = gsub('.* wk', 'wk', `Sample Name`)) %>% 
+  mutate(tissue = gsub('.* ', '', gsub(' wk.*', '', `Sample Name`))) %>% 
+  mutate(`Sample Number` = paste0('s', `Sample Number`)) %>% 
+  left_join(aggr.id, by = c('Sample Number' = 'library_id'))
+
+pbmc.ln@meta.data$barcode_id <- as.double(sub('.*-', '', colnames(pbmc.ln)))
+
+meta.pmbc.ln <- pbmc.ln@meta.data %>% 
+  rownames_to_column('barcode') %>% 
+  left_join(pheno) %>% 
+  left_join(metadata %>% dplyr::select(barcode, atac_peak_region_fragments,
+                                       atac_fragments)) %>% 
+  column_to_rownames('barcode')
+
+pbmc.ln <- AddMetaData(pbmc.ln, meta.pmbc.ln)
+
+# Add in the ATAC-seq data
+# removing peaks that are in scaffolds (no standard chromosomes)
+grange.counts <- StringToGRanges(rownames(atac_counts), sep = c(":", "-"))
+grange.use <- seqnames(grange.counts) %in% standardChromosomes(grange.counts)
+atac_counts <- atac_counts[as.vector(grange.use), ]
+annotations <- GetGRangesFromEnsDb(ensdb = edb)
+seqlevelsStyle(annotations) <- 'NCBI'
+genome(annotations) <- "Mmul_10"
+
+frag.file <- "data/raw/multiome/atac_fragments.tsv.gz"
+chrom_assay <- CreateChromatinAssay(
+   counts = atac_counts,
+   sep = c(":", "-"),
+   genome = 'Mmul_10',
+   fragments = frag.file,
+   min.cells = 10,
+   annotation = annotations
+ )
+
+pbmc.ln[["ATAC"]] <- chrom_assay
+
+pbmc.ln <- NucleosomeSignal(pbmc.ln, assay = 'ATAC')
+pbmc.ln <- TSSEnrichment(object = pbmc.ln, assay = 'ATAC')
+
+pbmc.ln$pct_reads_in_peaks <- pbmc.ln$atac_peak_region_fragments / pbmc.ln$atac_fragments * 100
+#pbmc$blacklist_fraction <- FractionCountsInRegion(object = pbmc, assay = "ATAC",
+#                                                  regions = blacklist_hg38)
+
+### Save RDS before subseting
+#saveRDS(pbmc.ln, 'data/processed/pbmc.ln.multiome.rds')
+pbmc.ln <- readRDS('data/processed/pbmc.ln.multiome.rds')
+
+vlnatac <- VlnPlot(
+  object = pbmc,
+  features = c('nCount_ATAC', 'TSS.enrichment', 'nucleosome_signal', 'pct_reads_in_peaks'),
+  pt.size = 0,
+  ncol = 4
+) 
+
+ggsave('results/multiome/violinplot_atac_pbmcln.pdf', vlnatac, device = pdf,
+       width = 9.5, height = 4.5)
+
+### Quality control RNA
+VlnPlot(pbmc.ln, features = c("nCount_ATAC", "nCount_RNA","percent.mt"), ncol = 3,
+        log = TRUE, pt.size = 0) + NoLegend()
+
+VlnPlot(pbmc.ln, features = c("nFeature_RNA", "nCount_RNA","percent.mt"), ncol = 3,
+        log = TRUE, pt.size = 0) + NoLegend()
+
+VlnPlot(pbmc.ln, features = c("nFeature_RNA"), group.by = 'Sample.Name',
+        pt.size = 0) + NoLegend() + geom_hline(yintercept = 300)
+
+VlnPlot(pbmc.ln, features = c("nCount_RNA"), ncol = 3,
+        log = TRUE, pt.size = 0) + NoLegend() + 
+  geom_hline(yintercept = c(500, 25000))
+
+VlnPlot(pbmc.ln, features = c("nCount_ATAC"), ncol = 3,
+        log = TRUE, pt.size = 0) + NoLegend() + 
+  geom_hline(yintercept = c(1000, 70000))
+
+VlnPlot(pbmc.ln, features = c("pct_reads_in_peaks"), group.by = 'Sample.Name',
+        log = TRUE, pt.size = 0) + NoLegend() 
+
+RidgePlot(pbmc.ln, features = c("nFeature_RNA"), group.by = 'Sample Number') + NoLegend()
+RidgePlot(pbmc.ln, features = c("nCount_RNA"), group.by = 'Sample Number', log = T)  + NoLegend()
+RidgePlot(pbmc.ln, features = c("percent.mt"), group.by = 'Sample Number') + NoLegend()
+
+RidgePlot(pbmc.ln, features = c("nFeature_ATAC"), group.by = 'Sample Number') + NoLegend()
+RidgePlot(pbmc.ln, features = c("nCount_ATAC"), group.by = 'Sample Number', log = T)  + NoLegend()
+
+### Quality control ATAC
+VlnPlot(pbmc.ln, features = c('TSS.enrichment', 'nucleosome_signal'), pt.size = 0)
+
+RidgePlot(pbmc.ln, features = c("TSS.enrichment"), group.by = 'Sample.Number') + NoLegend()
+RidgePlot(pbmc.ln, features = c("nucleosome_signal"), group.by = 'Sample.Number') + NoLegend()
+
+TSSPlot(pbmc.ln, group.by = 'high.tss', assay = 'ATAC') + NoLegend()
+```
+
+```{r LN - Doublet removal and Peak calling}
+pbmc.ln.raw <- readRDS('data/processed/pbmc.ln.multiome.rds')
+
+## Filter out low quality cells and subset LN cells
+ln.raw <- subset(x = pbmc.ln.raw,
+  subset = nCount_ATAC < 70000 &
+    nCount_ATAC > 1000 &
+    nCount_RNA < 25000 &
+    nCount_RNA > 500 &
+    nFeature_RNA > 300 &
+    percent.mt < 25 &
+    nucleosome_signal < 2 &
+    TSS.enrichment > 2 &
+    pct_reads_in_peaks > 20 &
+    tissue == 'LN'
+)
+
+## Doublet identification
+library(DoubletFinder)
+
+ln.raw.diet <- DietSeurat(ln.raw, assays = 'RNA')
+
+ln.raw.list <- SplitObject(ln.raw.diet, split.by = 'animal')
+
+ln.raw.list <- lapply(ln.raw.list, 
+                   function(x) {
+                     x <- NormalizeData(x) |> 
+                       FindVariableFeatures() |> 
+                       ScaleData() |> 
+                       RunPCA()
+                     x <- FindNeighbors(x, dims = 1:15)
+                     x <- FindClusters(x)
+                     x <- RunUMAP(x, dims = 1:15)
+                     
+                     sweep.res.list <- paramSweep(x, PCs = 1:15)
+                     sweep.res.nsclc <- summarizeSweep(sweep.res.list)
+                     bcmvn_nsclc <- find.pK(sweep.res.nsclc)
+                     
+                     pK <- bcmvn_nsclc %>% 
+                       dplyr::filter(BCmetric == max(BCmetric)) %>% 
+                       select(pK)
+                     pK <- as.numeric(as.character(pK[[1]]))
+                     
+                     annotations <- x@meta.data$seurat_clusters
+                     homotic.prop <- modelHomotypic(annotations)
+                     nExp_poi <- round(0.07*nrow(x@meta.data))
+                     nExp_poi.adj <- round(nExp_poi*(1-homotic.prop))
+                     
+                     doubletFinder(x, pK = pK, PCs = 1:15, nExp = nExp_poi.adj)})
+
+meta.data.list <- lapply(ln.raw.list, function(x) {
+  colnames(x@meta.data) <- sub('_0.25.*', '', colnames(x@meta.data))
+  return(x@meta.data)
+  })
+
+metadata.df <- bind_rows(meta.data.list)
+                      
+ln.raw <- AddMetaData(ln.raw, metadata.df)
+
+rm(ln.raw.list)
+rm(ln.raw.diet)
+gc()
+
+#saveRDS(ln.raw, 'data/processed/new/ln.raw.doublet_finder.rds')
+
+ln.singlet <- subset(ln.raw, subset = DF.classifications == 'Singlet')
+
+
+### Peak re-Calling
+DefaultAssay(ln.singlet) <- "ATAC"
+
+#Change location of 'fragments' in multiome Seurat file
+Fragments(pbmc.ln.raw@assays$ATAC) <- NULL
+fragments <- CreateFragmentObject(path = "atac_fragments.tsv.gz", 
+                                  cells = colnames(pbmc.ln.raw), 
+                                  validate.fragments = TRUE)
+Fragments(pbmc.ln.raw@assays$ATAC) <- fragments
+
+# Call peaks using MACS2
+peaks <- CallPeaks(ln.singlet, macs2.path = '/Users/ftencat/opt/anaconda3/bin/macs2')
+
+# Remove peaks on nonstandard chromosomes 
+library(GenomeInfoDb)
+peaks <- keepStandardChromosomes(peaks, pruning.mode = "coarse")
+
+# Save peaks file
+dir.create("data/processed/new/peaks")
+save(peaks, file = "data/processed/new/peaks/peaks.RData")
+
+# Quantify counts in each peak
+macs2_counts <- FeatureMatrix(
+  fragments = Fragments(ln.singlet),
+  features = peaks,
+  cells = colnames(ln.singlet)
+)
+
+#library(EnsDb.Hsapiens.v86)
+#annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+#seqlevelsStyle(annotations) <- 'UCSC'
+#genome(annotations) <- "hg38"
+
+library(AnnotationHub)
+ah <- AnnotationHub()
+qr <- query(ah, c("EnsDb", "mulatta", "109"))
+edb <- qr[[1]]
+annotations <- GetGRangesFromEnsDb(ensdb = edb)
+seqlevelsStyle(annotations) <- 'NCBI'
+genome(annotations) <- "Mmul_10"
+
+fragpath = "data/raw/multiome/atac_fragments.tsv.gz"
+
+# Create a new assay using the MACS2 peak set and add it to the pbmc object
+ln.singlet[["peaks"]] <- CreateChromatinAssay(
+  counts = macs2_counts,
+  fragments = fragpath,
+  annotation = annotations
+)
+
+DefaultAssay(ln.singlet) <- 'RNA'
+ln.singlet[['ATAC']] <- NULL
+#saveRDS(ln.singlet, 'data/processed/new/ln.peak.recalling.rds')
+```
+
+```{r LN umap + cell type annotation}
+ln.singlet <- readRDS('data/processed/new/ln.peak.recalling.rds')
+
+#### GEX
+ln.singlet <- NormalizeData(ln.singlet) %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+ElbowPlot(ln.singlet)
+
+ln.singlet <- RunUMAP(ln.singlet, dims = 1:5, reduction.name = 'umap.rna', 
+              reduction.key = 'rnaUMAP_')
+
+### ATAC 
+DefaultAssay(ln.singlet) <- 'peaks'
+
+ln.singlet <- FindTopFeatures(ln.singlet, min.cutoff = 5) %>% 
+  RunTFIDF() %>% 
+  RunSVD()
+
+DepthCor(ln.singlet)
+
+ln.singlet <- RunUMAP(ln.singlet, reduction = 'lsi', dims = 2:10, 
+                           reduction.name = "umap.atac", reduction.key = "atacUMAP_")
+
+DimPlot(ln.singlet)
+
+DimPlot(ln.singlet, group.by = 'animal', cols = 'glasbey')
+
+### WNN integration RNA + ATAC
+DefaultAssay(ln.singlet) <- 'RNA'
+
+ln.singlet <- FindMultiModalNeighbors(ln.singlet, reduction.list = list("pca", "lsi"), 
+                                dims.list = list(1:5, 2:10),
+                                verbose = TRUE)
+
+# Joint UMAP 
+ln.singlet <- RunUMAP(ln.singlet, nn.name = "weighted.nn", reduction.name = "wnn.umap",
+                reduction.key = "wnnUMAP_", verbose = TRUE)
+
+DimPlot(ln.singlet, reduction = 'wnn.umap')
+
+DimPlot(ln.singlet, reduction = 'wnn.umap', 
+        group.by = 'animal', 
+        cols = 'glasbey')
+
+DimPlot(ln.singlet, reduction = 'wnn.umap', 
+        group.by = 'animal', 
+        split.by = 'animal',
+        cols = 'glasbey', ncol = 4)
+
+FeaturePlot(ln.singlet, features = c('nCount_RNA', 'nFeature_RNA', 'percent.mt'), 
+            reduction = 'wnn.umap')
+
+## Cell type annotation
+# Azimuth
+library(Azimuth)
+library(SeuratData)
+
+ln.singlet <- RunAzimuth(ln.singlet, reference = "tonsilref")
+
+DimPlot(ln.singlet, group.by = 'predicted.celltype.l1', label = T,
+        label.box = T, repel = T, reduction = 'wnn.umap') + NoLegend()
+
+### Monaco
+library(SingleR)
+library(celldex)
+
+DefaultAssay(ln.singlet) <- 'RNA'
+ln.singlet.diet <- DietSeurat(object = ln.singlet, assays = "RNA")
+ln.se <- as.SingleCellExperiment(ln.singlet.diet)
+
+monaco.ref <- MonacoImmuneData()
+
+ln.monaco.label.main <- SingleR(test = ln.se, ref = monaco.ref, 
+                                assay.type.test = 1,
+                                labels = monaco.ref$label.main)
+
+ln.monaco.label.fine <- SingleR(test = ln.se, ref = monaco.ref, 
+                                assay.type.test = 1,
+                                labels = monaco.ref$label.fine)
+
+ln.singlet$singleR.label.main <- ln.monaco.label.main$labels
+ln.singlet$singleR.pruned.label.main <- ln.monaco.label.main$pruned.labels
+ln.singlet$singleR.label.fine <- ln.monaco.label.fine$labels
+ln.singlet$singleR.pruned.label.fine <- ln.monaco.label.fine$pruned.labels
+
+DimPlot(ln.singlet, group.by = 'singleR.label.fine', label = T,
+        label.box = T, repel = T, reduction = 'wnn.umap') + NoLegend()
+
+### Clustering and maker genes expression
+ln.singlet <- FindClusters(ln.singlet, graph.name = "wsnn", algorithm = 3, 
+                           resolution = 1, verbose = FALSE)
+
+DimPlot(ln.singlet, label = T, repel = T, reduction = 'wnn.umap') + NoLegend()
+
+
+t.cell.markers <- readxl::read_excel('data/raw/human.cell.surface.markers.xlsx',
+                                     sheet = 'human.t.cell.markers')
+
+cell.markers <- readxl::read_excel('data/raw/human.cell.surface.markers.xlsx',
+                                     sheet = 'human.cell.surface.markers')
+
+DotPlot(ln.singlet, 
+        features = c(unique(cell.markers$gene.symbol),
+                     "TBX21", "CXCR3", "IFNG", "CCR4", "GATA3", "PTGDR2", "IL4",
+                     "RORC", "IL17A", "CCR6", "FOXP3", "IL7R", "IL2RA", "TGFB1", "TGFB3",
+                     "BCL6", "CXCR5", "ICOS", "PDCD1", "IL21", "B3GAT1", "A4GALT", "CD38", "ICAM1"), 
+        cluster.idents = T, dot.min = 0.01, scale.by = 'size', assay = 'RNA') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_viridis_c(option = 'H')
+
+VlnPlot(ln.singlet, features = 'nFeature_RNA', group.by = 'seurat_clusters')
+
+### Remove cells from cluster 20 and recluster
+ln.singlet.filter <- subset(ln.singlet, subset = seurat_clusters != '20')
+
+# GEX
+ln.singlet.filter <- NormalizeData(ln.singlet.filter) %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+ln.singlet.filter <- RunUMAP(ln.singlet.filter, dims = 1:5, 
+                             reduction.name = 'umap.rna', reduction.key = 'rnaUMAP_')
+
+# ATAC 
+DefaultAssay(ln.singlet.filter) <- 'peaks'
+
+ln.singlet.filter <- FindTopFeatures(ln.singlet.filter, min.cutoff = 5) %>% 
+  RunTFIDF() %>% 
+  RunSVD()
+
+ln.singlet.filter <- RunUMAP(ln.singlet.filter, reduction = 'lsi', dims = 2:10, 
+                           reduction.name = "umap.atac", reduction.key = "atacUMAP_")
+
+### WNN integration RNA + ATAC
+DefaultAssay(ln.singlet.filter) <- 'RNA'
+
+ln.singlet.filter <- FindMultiModalNeighbors(ln.singlet.filter, 
+                                             reduction.list = list("pca", "lsi"), 
+                                             dims.list = list(1:5, 2:10),
+                                             verbose = TRUE)
+
+# Joint UMAP after remove cellls from cluster 20
+ln.singlet.filter <- RunUMAP(ln.singlet.filter, nn.name = "weighted.nn", 
+                             reduction.name = "wnn.umap", 
+                             reduction.key = "wnnUMAP_", verbose = TRUE)
+
+DimPlot(ln.singlet.filter, reduction = 'wnn.umap')
+
+DimPlot(ln.singlet.filter, reduction = 'wnn.umap', 
+        group.by = 'animal', 
+        cols = 'glasbey')
+
+## Recluster and marker genes expression
+ln.singlet.filter <- FindClusters(ln.singlet.filter, graph.name = "wsnn", algorithm = 3, 
+                           resolution = 1, verbose = FALSE)
+
+DimPlot(ln.singlet.filter, label = T, repel = T, reduction = 'wnn.umap') + NoLegend()
+
+cell.markers <- readxl::read_excel('data/raw/human.cell.surface.markers.xlsx',
+                                     sheet = 'human.cell.surface.markers')
+
+cluster.annot.plot <- DotPlot(ln.singlet.filter, 
+        features = c(unique(cell.markers$gene.symbol),
+                     "TBX21", "CXCR3", "IFNG", "CCR4", "GATA3", "PTGDR2", "IL4",
+                     "RORC", "IL17A", "CCR6", "FOXP3", "IL7R", "IL2RA", "TGFB1", "TGFB3",
+                     "BCL6", "CXCR5", "ICOS", "PDCD1", "IL21", "B3GAT1", "A4GALT", "CD38", "ICAM1"), 
+        cluster.idents = T, dot.min = 0.01, scale.by = 'size', assay = 'RNA') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9)) +
+  scale_color_viridis_c(option = 'H') + xlab('') + ylab('Cluster')
+
+ggsave('results/figures/new/dotplot_cluster_annotation_ln.pdf', cluster.annot.plot,
+       height = 5, width = 10.5)
+
+manual.annotation <- ln.singlet.filter@meta.data %>% 
+  mutate(manual.annotation = case_when(seurat_clusters %in% c(0, 1, 2) ~ 'CD4 T Naive',
+                                       seurat_clusters %in% c(5, 10) ~ 'CD8 T Naive',
+                                       seurat_clusters == 7 ~ 'CD8 T Eff/Mem',
+                                       seurat_clusters == 18 ~ 'NK',
+                                       seurat_clusters %in% c(8, 12, 13, 14, 
+                                                              15, 16, 17) ~ 'CD4 T Eff/Mem',
+                                       seurat_clusters == 21 ~ 'Cycling CD4/CD8',
+                                       seurat_clusters == 25 ~ 'pDC',
+                                       seurat_clusters == 20 ~ 'FDC',
+                                       seurat_clusters == 22 ~ 'Monocytes/Macrophages',
+                                       seurat_clusters %in% c(3, 4, 6, 9, 11) ~ 'B cells',
+                                       seurat_clusters == 24 ~ 'Plasma cells',
+                                       seurat_clusters %in% c(19, 23) ~ 'GC B cells'))
+
+ln.singlet.filter$manual.annotation <- manual.annotation$manual.annotation
+
+umap <- DimPlot(ln.singlet.filter, group.by = 'manual.annotation', label = T, repel = T,  
+        reduction = 'wnn.umap', label.size = 5) + NoLegend()
+
+#ggsave('results/figures/new/umap_ln_manual_annotation.png', umap,  dpi = 'retina',
+#       width = 7, height = 5.5)
+
+Idents(ln.obj) <- ln.obj$manual.annotation
+subset.annot.plot <- DotPlot(ln.obj, 
+        features = c(unique(cell.markers$gene.symbol)[-34],
+                     "TBX21", "CXCR3", "IFNG", "CCR4", "GATA3",  "IL4",
+                     "RORC", "IL17A", "CCR6", "FOXP3", "IL7R", "IL2RA", "TGFB1", 
+                     "TGFB3", "BCL6", "CXCR5", "ICOS", "PDCD1", "IL21", "B3GAT1", 
+                     "A4GALT", "CD38", "ICAM1"), 
+        cluster.idents = T, dot.min = 0.01, scale.by = 'size', assay = 'RNA') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9)) +
+  scale_color_viridis_c(option = 'H') + xlab('') + ylab('Subset')
+
+ggsave('results/figures/new/dotplot_cluster_annotation_ln.pdf', 
+       subset.annot.plot, height = 4, width = 12.5)
+
+
+
+
+
+
+#saveRDS(ln.singlet.filter, 'data/processed/new/ln.integrated_annot.rds')
+#ln.singlet.filter <- readRDS('data/processed/new/ln.integrated_annot.rds')
+
+### Estimate gene activity from ATAC-seq
+ln.obj <- readRDS('data/processed/new/ln.integrated_annot.rds')
+
+DefaultAssay(ln.obj) <- 'peaks'
+
+gene.activities <- GeneActivity(ln.obj, assay = 'peaks')
+
+ln.obj[['gene.activity']] <- CreateAssayObject(counts = gene.activities)
+ln.obj <- NormalizeData(
+  object = ln.obj,
+  assay = 'gene.activity',
+  normalization.method = 'LogNormalize',
+  scale.factor = median(ln.obj$nCount_gene.activity)
+)
+
+#saveRDS(ln.obj, 'data/processed/new/ln.integrated_annot_geneactivity.rds')
+
+#### ChromVar
+library(JASPAR2020)
+library(TFBSTools)
+library(AnnotationHub)
+
+ah <- AnnotationHub()
+qrz <- query(ah, c( "mulatta"))
+qr <- query(ah, c("EnsDb", "mulatta", "109"))
+edb <- qr[[1]]
+
+DefaultAssay(ln.obj) <- 'peaks'
+ 
+pfm <- getMatrixSet(x = JASPAR2020,
+                    opts = list(collection = "CORE", tax_group = 'vertebrates', 
+                                all_versions = FALSE))
+
+library(BSgenome.Mmulatta.UCSC.rheMac10)
+seqnames(Mmulatta) <- sub('chr', '', seqnames(Mmulatta))
+
+ln.obj <- AddMotifs(object = ln.obj, genome = Mmulatta, pfm = pfm)
+
+ln.obj <- RunChromVAR(object = ln.obj, genome = Mmulatta)
+
+DefaultAssay(ln.obj) <- 'chromvar'
+
+FeaturePlot(ln.obj, reduction = 'wnn.umap',
+            features = c('MA0772.1', 'MA0137.3', 'MA0769.2'), 
+            max.cutoff = 'q95', min.cutoff = 'q1')
+
+DefaultAssay(ln.obj) <- 'RNA'
+#saveRDS(ln.obj, 'data/processed/new/ln.integrated.annot.geneactivity.chromvar.rds')
+```
+
+```{r LN analysis}
+ln.obj <- readRDS('data/processed/new/ln.integrated_annot.rds')
+
+rna.plot <- DimPlot(ln.obj, group.by = 'animal', reduction = 'umap.rna', 
+                    cols = 'glasbey') + NoLegend() + ggtitle('RNA')
+
+#ggsave('results/figures/new/umap.ln.rna.png', rna.plot, 
+#       dpi = 'retina', height = 4, width = 4)
+
+atac.plot <- DimPlot(ln.obj, group.by = 'animal', reduction = 'umap.atac', 
+                    cols = 'glasbey') + NoLegend() + ggtitle('ATAC')
+
+#ggsave('results/figures/new/umap.ln.atac.png', atac.plot, 
+#       dpi = 'retina', height = 4, width = 4)
+
+integrated <- DimPlot(ln.obj, group.by = 'animal', reduction = 'wnn.umap', 
+                    cols = 'glasbey') + ggtitle('Integrated RNA + ATAC')
+
+#ggsave('results/figures/new/umap.ln.wnn.png', integrated, 
+#       dpi = 'retina', height = 4, width = 5)
+
+ln.clusters <- DimPlot(ln.obj, reduction = 'wnn.umap', 
+                       group.by = 'seurat_clusters', 
+                       label = T, repel = T, label.box = T) + 
+  NoLegend() + ggtitle('')
+
+#ggsave('results/figures/new/umap.ln.wnn.clusters.png', ln.clusters, 
+#       dpi = 'retina', height = 6, width = 6)
+
+### Add SIV-DNA group
+meta <- ln.obj@meta.data %>% 
+  mutate(siv.dna.group = case_when(animal %in% c('RYm17', 'RFl17', 'RBf17') ~ 'high',
+                                   animal %in% c('RWs17', 'RRh17', 'RBv17', "RNy16") ~ 'low'))
+
+ln.obj <- AddMetaData(ln.obj, meta)
+
+### Find marker genes
+Idents(ln.obj) <- ln.obj$manual.annotation
+
+ln.obj.markers.rna <- FindAllMarkers(ln.obj, only.pos = T, 
+                                     logfc.threshold = 0.25) |> 
+  dplyr::filter(p_val_adj < 0.05) 
+
+#### Heatmap with all ISGs differentially expressed between cell types
+gene_set_h <- msigdbr::msigdbr(category = 'H') |> 
+  dplyr::select(gs_name, gene_symbol) %>% 
+  unique()
+
+gene_set_c <- msigdbr::msigdbr(category = 'C2') %>% 
+  filter(grepl('CP:', gs_subcat)) %>% 
+  select(gs_name, gene_symbol) %>% 
+  unique()
+
+ifn.pathways <- c('REACTOME_INTERFERON_ALPHA_BETA_SIGNALING', 
+                  'REACTOME_INTERFERON_GAMMA_SIGNALING', 
+                  'REACTOME_INTERFERON_SIGNALING',
+                  'WP_INTERFERON_TYPE_I_SIGNALING_PATHWAYS',
+                  'WP_TYPE_III_INTERFERON_SIGNALING',
+                  'WP_TYPE_II_INTERFERON_SIGNALING_IFNG',
+                  'HALLMARK_INTERFERON_ALPHA_RESPONSE',
+                  'HALLMARK_INTERFERON_GAMMA_RESPONSE')
+
+isg.list <- gene_set_h |> 
+  bind_rows(gene_set_c) |> 
+  dplyr::filter(gs_name %in% ifn.pathways) |> 
+  dplyr::select(gene_symbol) |> 
+  unique() |> 
+  arrange(gene_symbol) |> 
+  deframe()
+
+ln.obj.markers.rna.isg <- ln.obj.markers.rna |> 
+  filter(gene %in% isg.list)
+
+#write_tsv(ln.obj.markers.rna.isg, 
+#          'results/figures/new/IFN_related_genes_LN_markers.tsv')
+
+#ifn.aggr.expr <- AggregateExpression(ln.obj, 
+#                                  features = unique(ln.obj.markers.rna.isg$gene), 
+#                                  assays = 'RNA')$RNA
+
+ifn.avg.expr <- AverageExpression(ln.obj, 
+                                  features = unique(ln.obj.markers.rna.isg$gene), 
+                                  assays = 'RNA')$RNA
+
+#cpm.ifn.aggr.expr <- edgeR::cpm(ifn.aggr.expr, log = T)
+#scaled.expr = t(scale(t(cpm.ifn.aggr.expr)))
+scaled.expr = t(scale(t(as.matrix(log1p(ifn.avg.expr)))))
+
+library(ComplexHeatmap)
+library(circlize)
+col_fun = colorRamp2(c(-4, -2, 0, 2, 4), c('darkblue', 'blue', 'white', 'red', 'darkred'))
+
+genes.of.interest <- ln.obj.markers.rna.isg |> 
+  group_by(cluster) |> 
+  slice_max(avg_log2FC, n = 5) |> 
+  ungroup() |> 
+  select(gene) |> 
+  deframe() |> 
+  unique()
+  
+#genes.of.interest <- scaled.expr |>  
+#  as.data.frame() |> 
+#  rownames_to_column('genesymbol') |> 
+#  pivot_longer(-genesymbol) |> 
+#  group_by(name) |> 
+#  slice_max(value, n = 5) |> 
+#  ungroup() |> 
+#  select(genesymbol) |> 
+#  deframe() |> 
+#  unique()
+  
+motif.position <- which(rownames(scaled.expr) %in% genes.of.interest)
+
+ha = rowAnnotation(foo = anno_mark(at = motif.position, 
+                                   labels = rownames(scaled.expr)[motif.position],
+                                   labels_gp = gpar(fontsize = 4)))
+
+Heatmap(scaled.expr, name = "z-score\nAvg. Expr.",
+        column_names_gp = gpar(fontsize = 8),
+        show_row_names = F, col = col_fun,
+        #row_names_gp = gpar(fontsize = 2),
+        column_names_rot = 45,
+        heatmap_width = unit(9, "cm"), 
+        heatmap_height =  unit(20, "cm"), 
+        clustering_method_rows = "ward.D2", 
+        right_annotation = ha,
+        clustering_method_columns = "ward.D2", 
+        #column_split =  2, 
+        #row_split = 2, 
+        border = TRUE)
+
+### Clustered dotplot with antiviral ISGs
+manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx')
+
+antiviral.isgs <- manual_pathways |> 
+  filter(gs_name == 'ANTIVIRAL_ISGS_Schoggins_2011') |> 
+  select(gene_symbol) |> 
+  deframe()
+
+deg.antiviral.isg <- ln.obj.markers.rna |> 
+  filter(gene %in% antiviral.isgs) |> 
+  select(gene) |> 
+  unique() |> 
+  deframe()
+
+color_vector <- colorRampPalette(c('darkblue', 'blue', 'white', 'red', 'darkred'))(100)
+
+antiviral.isgs.p <- scCustomize::Clustered_DotPlot(ln.obj, 
+                               features = deg.antiviral.isg,
+                               colors_use_exp = color_vector, 
+                               flip = T, x_lab_rotate = 60, 
+                               row_label_size = 15, column_label_size = 11)
+
+
+## Annotation ISG per subset
+deg.isg <- ln.obj.markers.rna.isg |> 
+  dplyr::select(cluster, gene)
+  
+deg.isg.list <- split(deg.isg$gene, deg.isg$cluster)
+
+gene_set_c2 <-msigdbr::msigdbr(category = 'C2')  |> 
+  filter(grepl('CP:', gs_subcat)) |> 
+  dplyr::select(gs_name, gene_symbol) %>%
+  unique()
+
+gene_set_h <-msigdbr::msigdbr(category = 'H')  |> 
+  dplyr::select(gs_name, gene_symbol) %>%
+  unique()
+
+gene_set_go <-msigdbr::msigdbr(category = 'C5') |>  
+  filter(grepl('GO:BP', gs_subcat)) |> 
+  dplyr::select(gs_exact_source, gene_symbol) %>%
+  unique()
+
+gene_set_reactome <-msigdbr::msigdbr(category = 'C2')  |> 
+  filter(grepl('REACTOME', gs_name)) |>  
+  dplyr::select(gs_exact_source, gene_symbol) %>%
+  unique()
+
+deg.isg.ora <- compareCluster(deg.isg.list, fun = 'enricher', 
+                              TERM2GENE = gene_set_c2)
+
+x <- deg.isg.ora@compareClusterResult |> 
+  filter(Count >= 5,
+         !grepl("(ifn|interferon)", ID, ignore.case =T)) 
+
+#####
+deg.isg <- ln.obj.markers.rna.isg |> 
+  dplyr::select(cluster, gene) |> 
+  mutate(class = case_when(cluster %in% c('Monocytes/Macrophages',
+                                          'FDC', 'pDC') ~ 'myeloid',
+                           cluster == 'Plasma cells' ~ 'plasma.cells',
+                           TRUE ~ 'lymphoid'))
+
+deg.isg.list <- split(deg.isg$gene, deg.isg$class)
+
+deg.isg.ora <- compareCluster(deg.isg.list, fun = 'enricher', 
+                              TERM2GENE = gene_set_c2)
+
+deg.isg.ora.go <- compareCluster(deg.isg.list, fun = 'enricher', 
+                                 TERM2GENE = gene_set_go)
+
+deg.isg.ora.h <- compareCluster(deg.isg.list, fun = 'enricher', 
+                                 TERM2GENE = gene_set_h)
+
+
+
+# lymphoid
+pathways.lymphoid.go <- deg.isg.ora.go |> 
+  filter(Count >= 10,
+         Cluster == 'lymphoid')
+
+mat = GO_similarity(pathways.lymphoid.go@compareClusterResult$ID)
+df = simplifyGO(mat)
+
+pathways.lymphoid <- deg.isg.ora |> 
+  filter(Count >= 5,
+         !grepl("(ifn|interferon)", ID, ignore.case = T),
+         Cluster == 'lymphoid',
+         p.adjust < 0.0001) 
+
+edo.pathways.lymphoid <- pairwise_termsim(pathways.lymphoid, showCategory = Inf)
+
+plot.pathways.lymphoid <- emapplot(edo.pathways.lymphoid, 
+                                   showCategory = Inf) 
+
+nodes.pathways.lymphoid <- plot.pathways.lymphoid$data %>% 
+  select(name, size) %>% 
+  dplyr::rename(id= name) %>% 
+  left_join(pathways.lymphoid@compareClusterResult %>% select(Cluster, ID),
+            by = c('id' = 'ID')) %>% 
+  mutate(score = 1) %>% 
+  mutate(score = as.integer(score)) |> 
+  mutate(id = gsub("_", " ", id))
+
+edges.pathways.lymphoid <- edo.pathways.lymphoid@termsim %>% 
+  as.data.frame() %>% 
+  rownames_to_column('source') %>% 
+  pivot_longer(-source, names_to = 'target', values_to = 'weight', 
+               values_drop_na = T) %>% 
+  filter(source != target, weight > 0.2) %>% 
+  mutate(source = gsub("_", " ", source), target = gsub("_", " ", target))
+
+createNetworkFromDataFrames(nodes = nodes.pathways.lymphoid,
+                            edges = edges.pathways.lymphoid, 
+                            title = "Pathways - lymphoid")
+
+# myeloid
+pathways.myeloid.go <- deg.isg.ora.go |> 
+  filter(Count >= 10,
+         Cluster == 'myeloid')
+
+mat = GO_similarity(pathways.myeloid.go@compareClusterResult$ID)
+df = simplifyGO(mat)
+
+
+pathways.myeloid <- deg.isg.ora |> 
+  filter(Count >= 5,
+         !grepl("(ifn|interferon)", ID, ignore.case = T),
+         Cluster == 'myeloid',
+         p.adjust < 0.0001) 
+
+
+edo.pathways.myeloid <- pairwise_termsim(pathways.myeloid, showCategory = Inf)
+
+plot.pathways.myeloid <- emapplot(edo.pathways.myeloid, 
+                                   showCategory = Inf) 
+
+nodes.pathways.myeloid <- plot.pathways.myeloid$data %>% 
+  select(name, size) %>% 
+  dplyr::rename(id= name) %>% 
+  left_join(pathways.myeloid@compareClusterResult %>% select(Cluster, ID),
+            by = c('id' = 'ID')) %>% 
+  mutate(score = 1) %>% 
+  mutate(score = as.integer(score)) |> 
+  mutate(id = gsub("_", " ", id))
+
+edges.pathways.myeloid <- edo.pathways.myeloid@termsim %>% 
+  as.data.frame() %>% 
+  rownames_to_column('source') %>% 
+  pivot_longer(-source, names_to = 'target', values_to = 'weight', 
+               values_drop_na = T) %>% 
+  filter(source != target, weight > 0.2) %>% 
+  mutate(source = gsub("_", " ", source), target = gsub("_", " ", target))
+
+createNetworkFromDataFrames(nodes = nodes.pathways.myeloid,
+                            edges = edges.pathways.myeloid, 
+                            title = "Pathways - myeloid")
+
+### Feature plot ISG expression
+ln.obj <- AddModuleScore(ln.obj, features = list(antiviral.isg = antiviral.isgs), 
+                         name = 'Antiviral.ISGs')
+
+ifng.p <- FeaturePlot(ln.obj, features = 'IFNG', reduction = 'wnn.umap',
+                      min.cutoff = 'q1', max.cutoff = 'q90', cols = c('lightgrey', 'red'))
+
+stat1.p <-FeaturePlot(ln.obj, features = 'STAT1', reduction = 'wnn.umap', 
+                      min.cutoff = 'q1', max.cutoff = 'q90', cols = c('lightgrey', 'red'))
+
+bst2.p <-FeaturePlot(ln.obj, features = 'BST2', reduction = 'wnn.umap', 
+                      min.cutoff = 'q1', max.cutoff = 'q90', cols = c('lightgrey', 'red'))
+
+antiviral.p <- FeaturePlot(ln.obj, features = 'Antiviral.ISGs1', reduction = 'wnn.umap',
+                           min.cutoff = 'q1', max.cutoff = 'q90' ,cols = c('lightgrey', 'red')) +
+  ggtitle('Antiviral ISGs')
+
+p <- ifng.p + stat1.p + bst2.p+ antiviral.p + plot_layout(ncol = 2)
+p <- ifng.p + antiviral.p + plot_layout(ncol = 2)
+
+#ggsave('results/figures/new/umap_ln_IFNG_STAT1_Antiviral.png', p, 
+#       dpi = 'retina', width = 7.5, height = 6)
+
+ggsave('results/figures/new/umap_ln_IFNG_Antiviral_module.png', p, 
+       dpi = 'retina', width = 9.5, height = 4)
+
+Idents(ln.obj) <- ln.obj$manual.annotation.fine
+
+ifng.vln <- VlnPlot(ln.obj, features = 'IFNG') + xlab('') +NoLegend()
+
+antiviral.vln <- VlnPlot(ln.obj, features =  'Antiviral.ISGs1') + 
+  xlab('') + ggtitle('Antiviral ISGs') + NoLegend()
+
+vln.plot.isg <- ifng.vln  + antiviral.vln + plot_layout(ncol = 2)
+  
+ggsave('results/figures/new/violinplot_ln_IFNG_Antiviral_module.png', vln.plot.isg, 
+       dpi = 'retina', width = 9.5, height = 5)
+
+sum(ln.obj$Antiviral.ISGs1 >0)
+
+sum(GetAssayData(object = my_object, slot = "data")[my_gene,]>0)/nrow(my_object@meta.data)
+
+p <- FeaturePlot(ln.obj, reduction = 'wnn.umap', features = c('TGFB1', 'TGFBR1', 'TGFBR2'), 
+                 min.cutoff = 'q1', max.cutoff = 'q90' ,cols = c('lightgrey', 'red'))
+
+ggsave('results/figures/new/umap_ln_TGFb.png', p, 
+       dpi = 'retina', width = 7.5, height = 6)
+
+### Feature plot TGFb expression
+tgfb1.p <- FeaturePlot(ln.obj, features = 'TGFB1', reduction = 'wnn.umap',
+                      min.cutoff = 'q1', max.cutoff = 'q90', 
+                      cols = c('lightgrey', 'red'))
+
+tgfbr1.p <-FeaturePlot(ln.obj, features = 'TGFBR1', reduction = 'wnn.umap', 
+                      min.cutoff = 'q1', max.cutoff = 'q90', 
+                      cols = c('lightgrey', 'red'))
+
+smad2.p <-FeaturePlot(ln.obj, features = 'SMAD2', reduction = 'wnn.umap', 
+                      min.cutoff = 'q1', max.cutoff = 'q90', 
+                     cols = c('lightgrey', 'red'))
+
+smad3.p <-FeaturePlot(ln.obj, features = 'SMAD3', reduction = 'wnn.umap', 
+                      min.cutoff = 'q1', max.cutoff = 'q90', 
+                     cols = c('lightgrey', 'red'))
+
+smarc4.p <-FeaturePlot(ln.obj, features = 'SMARCA4', reduction = 'wnn.umap', 
+                      min.cutoff = 'q1', max.cutoff = 'q90', 
+                     cols = c('lightgrey', 'red'))
+
+gsk3b.p <-FeaturePlot(ln.obj, features = 'GSK3B', reduction = 'wnn.umap', 
+                      min.cutoff = 'q1', max.cutoff = 'q90', 
+                     cols = c('lightgrey', 'red'))
+
+
+p <- tgfb1.p+ tgfbr1.p + smad2.p+ smad3.p + smarc4.p + gsk3b.p + plot_layout(ncol = 2)
+
+#ggsave('results/figures/new/umap_ln_TGFb_pathway.png', p, 
+#       dpi = 'retina', width = 7.5, height = 9)
+
+
+DefaultAssay(ln.obj) <- 'gene.activity'
+
+ifnb1 <- FeaturePlot(ln.obj, features = 'IFNB1', reduction = 'wnn.umap',
+            min.cutoff = 'q1', max.cutoff = 'q95', cols = c('lightgrey', 'red'))
+
+#ggsave('results/figures/new/umap_ln_IFNB1_gene_activity_atac.png', ifnb1, 
+#       dpi = 'retina', width = 3.75, height = 3)
+```
+
+```{r CD4/CD8 T cells}
+ln.obj <- readRDS('data/processed/new/ln.integrated.annot.geneactivity.chromvar.rds')
+
+t.cell.obj <- subset(ln.obj, 
+                     subset = manual.annotation %in% c('CD4 T Naive', 'CD8 T Naive',
+                                                       'CD4 T Eff/Mem', 'CD8 T Eff/Mem',
+                                                       'Cycling CD4/CD8'))
+
+## Peak re-calling
+DefaultAssay(t.cell.obj) <- 'peaks'
+
+FilterCells(
+  fragments = "data/raw/multiome/atac_fragments.tsv.gz",
+  cells = rownames(t.cell.obj@meta.data),
+  outfile = "data/processed/new/atac_fragments_Tcell.filtered.tsv.gz",
+  verbose = TRUE
+)
+
+Fragments(t.cell.obj@assays$peaks) <- NULL
+
+fragments <- CreateFragmentObject(path = "data/processed/new/atac_fragments_Tcell.filtered.tsv.gz",
+                                  cells = colnames(t.cell.obj), 
+                                  validate.fragments = TRUE)
+
+Fragments(t.cell.obj@assays$peaks) <- fragments
+
+peaks.t.cell.obj <- CallPeaks(t.cell.obj, 
+                              macs2.path = '/Users/ftencat/opt/anaconda3/bin/macs2')
+
+library(GenomeInfoDb)
+peaks.t.cell.obj <- keepStandardChromosomes(peaks.t.cell.obj, pruning.mode = "coarse")
+
+# Quantify counts in each peak
+macs2_counts <- FeatureMatrix(
+  fragments = Fragments(t.cell.obj),
+  features = peaks.t.cell.obj,
+  cells = colnames(t.cell.obj)
+)
+
+library(AnnotationHub)
+ah <- AnnotationHub()
+qr <- query(ah, c("EnsDb", "mulatta", "109"))
+edb <- qr[[1]]
+annotations <- GetGRangesFromEnsDb(ensdb = edb)
+seqlevelsStyle(annotations) <- 'NCBI'
+genome(annotations) <- "Mmul_10"
+
+fragpath = "data/processed/new/atac_fragments_Tcell.filtered.tsv.gz"
+
+# Create a new assay using the MACS2 peak set and add it to the pbmc object
+t.cell.obj[["t.cell.peaks"]] <- CreateChromatinAssay(
+  counts = macs2_counts,
+  fragments = fragpath,
+  annotation = annotations
+)
+
+DefaultAssay(t.cell.obj) <- 't.cell.peaks'
+t.cell.obj[['peaks']] <- NULL
+
+## ATAC
+t.cell.obj <- FindTopFeatures(t.cell.obj, min.cutoff = 5) %>% 
+  RunTFIDF() %>% 
+  RunSVD()
+
+DepthCor(t.cell.obj)
+
+t.cell.obj <- RunUMAP(t.cell.obj, reduction = 'lsi', dims = 2:10, 
+                      reduction.name = "umap.atac", reduction.key = "atacUMAP_")
+
+DimPlot(t.cell.obj, group.by = 'animal', reduction = 'umap.atac')
+
+# GEX
+DefaultAssay(t.cell.obj) <- 'RNA'
+t.cell.obj <- NormalizeData(t.cell.obj) %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+ElbowPlot(t.cell.obj)
+
+t.cell.obj <- RunUMAP(t.cell.obj, dims = 1:20, reduction.name = 'umap.rna', 
+              reduction.key = 'rnaUMAP_')
+
+DimPlot(t.cell.obj, group.by = 'animal', reduction = 'umap.rna')
+
+### WNN
+DefaultAssay(t.cell.obj) <- 'RNA'
+
+t.cell.obj <- FindMultiModalNeighbors(t.cell.obj, reduction.list = list("pca", "lsi"), 
+                                dims.list = list(1:20, 2:10),
+                                verbose = TRUE)
+
+# build a joint UMAP visualization
+t.cell.obj <- RunUMAP(t.cell.obj, nn.name = "weighted.nn", reduction.name = "wnn.umap",
+                      reduction.key = "wnnUMAP_", verbose = TRUE)
+
+DimPlot(t.cell.obj, reduction = 'wnn.umap', group.by = 'animal')
+
+DimPlot(t.cell.obj, reduction = 'wnn.umap', 
+        group.by = 'animal', split.by = 'animal', ncol = 4)
+
+### Reclustering
+t.cell.obj <- FindClusters(t.cell.obj, graph.name = "wsnn", 
+                           algorithm = 3, verbose = FALSE, resolution = 1)
+
+DimPlot(t.cell.obj, reduction = 'wnn.umap', label = T, 
+        label.box = T, repel = T) + NoLegend()
+
+DimPlot(t.cell.obj, split.by = 'seurat_clusters', ncol=6) + NoLegend()
+
+t.cell.markers <- readxl::read_excel('data/raw/human.cell.surface.markers.xlsx',
+                                     sheet = 'human.t.cell.markers')
+
+DotPlot(t.cell.obj, features = c(unique(t.cell.markers$gene.symbol), 'TNF'), 
+        cluster.idents = T, dot.min = 0.01, scale.by = 'size', assay = 'RNA') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_viridis_c(option = 'H')
+
+#saveRDS(t.cell.obj, 'data/processed/new/t.cell.integrated.rds')
+t.cell.obj <- readRDS('data/processed/new/t.cell.integrated.rds')
+
+manual.annotation <- t.cell.obj@meta.data %>% 
+  mutate(manual.annotation.fine = case_when(seurat_clusters %in% c('7', '4', 
+                                                                   '20', '1', '2')  ~ 'CD4 T Naive',
+                                            seurat_clusters %in% c('9', '3', '6',
+                                                                   '21', '18', '22', '19')  ~ 'CD8 T Naive',
+                                            seurat_clusters %in% c('16', '5')  ~ 'CD8 T Eff/Mem',
+                                            seurat_clusters %in% c('0', '13')  ~ 'Treg',
+                                            seurat_clusters %in% c('8', '11')  ~ 'Tfh',
+                                            seurat_clusters %in% c('10', '15')  ~ 'CD4 T Intermediate',
+                                            seurat_clusters == '14'  ~ 'Cycling CD4/CD8',
+                                            seurat_clusters == '12'  ~ 'Th2/Th17',
+                                            seurat_clusters == '17'  ~ 'Th1'))
+
+t.cell.obj$manual.annotation.fine <- manual.annotation$manual.annotation.fine
+ 
+umap.tcell <- DimPlot(t.cell.obj, group.by = 'manual.annotation.fine',   
+        reduction = 'wnn.umap', label.size = 5, 
+        cols = RColorBrewer::brewer.pal(9,'Paired')) + ggtitle('T cell subsets')
+
+#ggsave('results/figures/new/umap_tcell_subsets.png', 
+#       umap.tcell, width = 6.5, height = 3.5, dpi = 'retina', bg = 'white')
+
+Idents(t.cell.obj) <- t.cell.obj$manual.annotation.fine
+subset.dotpot <- DotPlot(t.cell.obj, features = c(unique(t.cell.markers$gene.symbol)[-c(15,25,28)], 'TNF'), 
+        cluster.idents = T, dot.min = 0.01, scale.by = 'size', assay = 'RNA') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_viridis_c(option = 'H') +
+  theme(axis.text.x = element_text(size=10)) +
+  ylab('T cell subset')
+
+ggsave('results/figures/new/dotplot_tcell_subsets_marker_genes.png', 
+       subset.dotpot, width = 12.5, height = 3.5, dpi = 'retina', bg = 'white')
+
+#### Density Plots + Feature Plots
+ctl <- plot_density(t.cell.obj, features = c('IFNG', 'GZMB', 'PRF1', 'TBX21'),
+                    reduction = 'wnn.umap', pal = 'inferno')
+
+#ggsave('results/figures/new/density_plot_effector_markers.png', ctl,
+#       dpi = 'retina', height = 8, width = 10)
+
+ctl.expr  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                         features = c('IFNG', 'GZMB', 'PRF1', 'CCL5'), 
+                         max.cutoff = 'q90', 
+                         cols = c('lightgrey', 'red'))
+
+ggsave('results/figures/new/feature_plot_effector_markers.png',
+       ctl.expr, dpi = 'retina', height = 8, width = 10)
+
+il10 <- FeaturePlot(ln.obj, features = 'IL10', reduction = 'wnn.umap', 
+                    max.cutoff = 'q90', cols = c('lightgrey', 'red'))
+
+DefaultAssay(ln.obj) <- 'chromvar'
+
+stat3 <- FeaturePlot(ln.obj, features = 'MA0144.2', reduction = 'wnn.umap', 
+                    min.cutoff = 'q1', max.cutoff = 'q90', 
+                    cols = c('lightgrey', 'red')) + ggtitle('MA0144.2 - STAT3')
+
+p <- il10 + stat3 + patchwork::plot_layout(ncol = 2)
+
+ggsave('results/figures/new/feature_plot_il10_stat3.png',
+       p, dpi = 'retina', scale = 0.6)
+
+#### GEX Low vs High SIV-DNA
+DefaultAssay(t.cell.obj) <- 'RNA'
+Idents(t.cell.obj) <- t.cell.obj$manual.annotation.fine
+idents <- levels(Idents(t.cell.obj))
+degs.list <- list()
+for(i in 1:length(idents)) {
+    degs.list[[i]] <- FindMarkers(t.cell.obj, 
+                                  ident.1 = "low", 
+                                  ident.2 = "high",
+                                  group.by = 'siv.dna.group', 
+                                  subset.ident = idents[i])
+}
+names(degs.list) <- idents
+
+dnmt3_tf <- read.gmt('data/raw/gene_signatures/DNMT3A_signature_TF_and_Total.gmt') |>  
+  filter(gene != '') |> 
+  rename(gs_name = term, gene_symbol = gene)
+
+epigenetic <- read.gmt('data/raw/gene_signatures/Epigenetic.gmt') |> 
+  filter(gene != '') |> 
+  rename(gs_name = term, gene_symbol = gene)
+
+kg_epigenetic <- read.gmt('data/raw/gene_signatures/kg_epigenetics.gmt.txt') |> 
+  filter(gene != '') |> 
+  rename(gs_name = term, gene_symbol = gene)
+
+kg_rf <- read.gmt('data/raw/gene_signatures/combined.gmt') |>  
+  filter(gene != '', term == 'RESTRICTION_FACTORS') |> 
+  dplyr::rename(gs_name = term, gene_symbol = gene)
+
+ec_mono_pathways <- readxl::read_excel('data/raw/DEG_monocytes_EC vs non-HIC.xlsx') 
+
+ec_mono_geneset <- ec_mono_pathways |> 
+  unite('gs_name', c(comparison, regulation)) |> 
+  dplyr::select(gs_name, gene) |> 
+  dplyr::rename(gene_symbol = gene) |> 
+  arrange(gs_name, gene_symbol) |> 
+  unique()
+
+manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx') |> 
+  mutate(gs_name = sub('(_Schoggins_2011|_Abdel-Mohsen_2015)', '', gs_name))
+
+x <- manual_pathways |> 
+  mutate(value = 1) |> 
+  select(-source) |> 
+  pivot_wider(names_from = gs_name, values_from = value) |>   
+  dplyr::mutate(across(-gene_symbol, ~ifelse(. == 1, gene_symbol, NA))) |> 
+  select(-gene_symbol)
+
+write_clip(x)
+
+gene_set_c7 <-msigdbr::msigdbr(category = 'C7') %>%  
+  select(gs_name, gene_symbol) %>%
+  unique()
+
+gene_set_c3 <-msigdbr::msigdbr(category = 'C3')  |> 
+  filter(grepl('TFT:TFT_Legacy', gs_subcat)) |> 
+  select(gs_name, gene_symbol) %>%
+  unique()
+
+gene_set_c3 <-msigdbr::msigdbr(category = 'C2')  |> 
+  filter(grepl('CP:', gs_subcat)) |> 
+  select(gs_name, gene_symbol) %>%
+  unique()
+
+gene_set_h_manual <- msigdbr::msigdbr(category = 'H') %>%  
+  select(gs_name, gene_symbol) %>% 
+  bind_rows(manual_pathways %>% 
+              select(gs_name, gene_symbol))  |> 
+  bind_rows(ec_mono_geneset) |> 
+#  bind_rows(gene_set_c3) |> 
+#  bind_rows(epigenetic) |>
+#  bind_rows(kg_epigenetic) |>
+#  bind_rows(dnmt3_tf) |>
+#  bind_rows(gene_set_smad_methyl) |>
+  unique()
+
+gene_set_regulon <- read_tsv('results/pyscenic/regulons.tidy.unique.tsv') 
+
+gene_set_smad_methyl <-msigdbr::msigdbr() |> 
+  filter(grepl('(methylation|smad3)', gs_name, ignore.case=TRUE)) |> 
+  select(gs_name, gene_symbol) %>%
+  unique()
+
+# ORA
+gene.list.up <- list()
+gene.list.down <- list()
+for(i in seq_along(degs.list)) {
+  
+  gene.list.up[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC > 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+  
+  gene.list.down[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC < 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+}
+names(gene.list.up) <- names(degs.list)
+names(gene.list.down) <- names(degs.list)
+
+gene.list.up <- compact(gene.list.up)
+gene.list.down <- compact(gene.list.down)
+
+ora.list.up <- compareCluster(gene.list.up, fun = 'enricher', 
+                              TERM2GENE = gene_set_h_manual, 
+                              universe = rownames(t.cell.obj))
+
+#write_tsv(ora.list.up@compareClusterResult, 
+#          'results/figures/new/ORA_Tcells_Low_vs_High_SIVDNA_up.tsv')
+
+ora.list.down <- compareCluster(gene.list.down, fun = 'enricher', 
+                                TERM2GENE = gene_set_h_manual,
+                                universe = rownames(t.cell.obj))
+
+#write_tsv(ora.list.down@compareClusterResult, 
+#          'results/figures/new/ORA_Tcells_Low_vs_High_SIVDNA_down.tsv')
+
+ora.plot.up <- dotplot(ora.list.up %>% filter(Count >= 3) %>% 
+                         mutate(Description = sub('HALLMARK', '', Description)), 
+        label_format = 50, size = 'Count', showCategory = Inf) +
+  scale_fill_gradient(low = 'red4', high = 'indianred1') + 
+  labs(x = '') +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+#ggsave('results/figures/new/dotplot_ORA_tcell.ln_ECsignature_up.pdf', ora.plot.up,
+#       device = 'pdf', height = 4, width = 7)
+
+genes.up.network <- cnetplot(ora.list.up %>% filter(Count >= 3), shadowtext = 'none',
+                             cex.params = list(category_node = 0.3, gene_node = 0.1))
+
+#ggsave('results/figures/new/network_ora_up_tcell.ln.pdf', genes.up.network,
+#       scale = 0.6, device = 'pdf')
+
+ora.plot.down <- dotplot(ora.list.down %>% filter(Count >= 3) %>% 
+                         mutate(Description = sub('HALLMARK', '', Description)), 
+        label_format = 50, size = 'Count',  showCategory = Inf) +
+  scale_fill_gradient(low = 'blue4', high = 'skyblue') + 
+  labs(x = '') +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+#ggsave('results/figures/new/dotplot_ORA_tcell.ln_ECsignature_down.pdf', ora.plot.down,
+#       device = 'pdf', height = 4, width = 7)
+
+genes.down.network <- cnetplot(ora.list.down %>% filter(Count >= 3), shadowtext = 'none',
+                             cex.params = list(category_node = 0.3, gene_node = 0.1))
+
+#ggsave('results/figures/new/network_ora_down_tcell.ln.pdf', genes.down.network,
+#       scale = 0.6, device = 'pdf')
+
+bind_ora <- bind_rows(list(up = ora.list.up@compareClusterResult,
+                    down = ora.list.down@compareClusterResult), .id = 'id') |> 
+  filter(Count >= 3) |> 
+  mutate(ID = sub('HALLMARK_', '', ID))
+
+#write_tsv(bind_ora, 'results/ORA_hallmark_epigenetics.tsv')
+
+mat <- bind_ora %>% 
+  dplyr::mutate(Count = ifelse(id == 'down', -1, 1)) |> 
+  dplyr::select(Cluster, ID, Count) |>  
+  pivot_wider(names_from = Cluster, values_from = Count, values_fill = 0) |> 
+  column_to_rownames('ID') |> 
+  as.matrix()
+   
+clust.row  <- hclust(dist(mat)) 
+clust.column  <- hclust(dist(t(mat)))
+
+dotplot <- bind_ora |> 
+  dplyr::mutate(ID = factor(ID, levels = clust.row$labels ),
+                Cluster = factor(Cluster, levels = clust.column$labels )) |> 
+  ggplot(aes(x = Cluster, y = ID)) + 
+         geom_point(aes(size = Count, fill = id), shape = 21) +
+         theme_bw(base_size = 12) +
+         scale_fill_manual(values = c('blue', 'red'), name = 'Direction',
+                           labels = c('Downregulated', 'Upregulated')) +
+  labs(x = '', y = '')+
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 13))
+
+ggsave('results/figures/new/dotplot_ORA_tcell.ln.pdf', dotplot,
+       device = 'pdf', height = 4.5, width = 8)
+#ggsave('results/figures/new/dotplot_ORA_tcell.ln_TFtargets.pdf', dotplot,
+#       device = 'pdf', scale = 0.8)
+#ggsave('results/figures/new/dotplot_ORA_tcell.ln_epigenetics.pdf', dotplot,
+#       device = 'pdf', scale = 0.8)
+
+### IRF7 targets
+irf7.targets <- gene_set_c3 |> 
+  filter(gs_name == 'IRF7_01') |> 
+  select(gene_symbol) |> deframe()
+
+df.up <- plyr::ldply(gene.list.up, data.frame) |> 
+  dplyr::rename(Cluster = `.id`, geneID = `X..i..`) 
+
+df.down <- plyr::ldply(gene.list.down, data.frame) |> 
+  dplyr::rename(Cluster = `.id`, geneID = `X..i..`) 
+
+irf7.targets.up <- df.up |> 
+  filter(geneID %in% irf7.targets)
+
+irf7.targets.down <- df.down |> 
+  filter(geneID %in% irf7.targets)
+
+degs.df <- bind_rows(lapply(degs.list, 
+                            function(x) x |> 
+                              rownames_to_column('geneID')), .id = 'Cluster') |> 
+  dplyr::select(Cluster, geneID, p_val_adj, avg_log2FC)
+
+irf7.up.le <- irf7.targets.up |> 
+  left_join(degs.df) |> 
+  select(Cluster, geneID, avg_log2FC) |> 
+  unique() |> 
+  pivot_wider(names_from = 'geneID', values_from = 'avg_log2FC') |> 
+  column_to_rownames('Cluster')
+  
+Heatmap(t(irf7.up.le), name = 'log2FoldChange', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(colors = c('white', 'red'), 
+                         breaks = c(0,3)), 
+        column_names_rot = 45, width = unit(5, "cm"), height = unit(9, 'cm'),
+        rect_gp = gpar(col = "black", lwd = 0.2), 
+        row_names_gp = gpar(fontsize = 8))
+
+### SMAD Targets
+smad.targets <- gene_set_c3 |> 
+  filter(gs_name %in% c('SMAD_Q6','SMAD3_Q6', 'SMAD4_Q6')) |> 
+  select(gene_symbol) |> deframe()
+
+df.up <- ldply(gene.list.up, data.frame)
+df.down <- ldply(gene.list.down, data.frame)
+
+smad.targets.up <- df.up |> 
+  dplyr::rename(genesymbol = `X..i..`) |> 
+  filter(genesymbol %in% smad.targets)
+
+smad.targets.down <- df.down |> 
+  dplyr::rename(genesymbol = `X..i..`) |> 
+  filter(genesymbol %in% smad.targets)
+
+smad.le <- smad.targets.down |> 
+  dplyr::rename(Cluster = `.id`, geneID = genesymbol) |> 
+  left_join(degs.df) |> 
+  select(Cluster, geneID, avg_log2FC) |> 
+  unique() |> 
+  pivot_wider(names_from = 'geneID', values_from = 'avg_log2FC') |> 
+  column_to_rownames('Cluster')
+  
+Heatmap(t(smad.le), name = 'log2FoldChange', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(colors = c('white', 'blue'), breaks = c(0,-2.5)), 
+        column_names_rot = 45, width = unit(5, "cm"), height = unit(9, 'cm'),
+        rect_gp = gpar(col = "black", lwd = 0.2), 
+        row_names_gp = gpar(fontsize = 8))
+
+up.reg.genes <- ora.list.up@compareClusterResult |> 
+  select(geneID) |> 
+  separate_longer_delim(geneID, delim= '/') |> 
+  deframe()
+
+down.reg.genes <- ora.list.down@compareClusterResult |> 
+  select(geneID) |> 
+  separate_longer_delim(geneID, delim= '/') |> 
+  deframe()
+
+down.smad.targets <- unique(down.reg.genes[down.reg.genes %in% smad.targets])
+
+degs.df <- bind_rows(lapply(degs.list, 
+                            function(x) x |> 
+                              rownames_to_column('geneID')), .id = 'Cluster') |> 
+  dplyr::select(Cluster, geneID, p_val_adj, avg_log2FC)
+
+tcell.antiviral.le <- bind_ora |> 
+  dplyr::filter(grepl('ANTIVIRAL', ID)) |> 
+  separate_longer_delim(geneID, delim = '/') |> 
+  left_join(degs.df) |> 
+  select(Cluster, geneID, avg_log2FC) |> 
+  unique() |> 
+  pivot_wider(names_from = 'geneID', values_from = 'avg_log2FC') |> 
+  column_to_rownames('Cluster')
+  
+Heatmap(t(tcell.antiviral.le), name = 'log2FoldChange', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(colors = c('white', 'red'), breaks = c(0,6)), 
+        column_names_rot = 45, width = unit(4, "cm"), height = unit(7, 'cm'),
+        rect_gp = gpar(col = "black", lwd = 0.2), 
+        row_names_gp = gpar(fontsize = 8))
+
+tcell.tnf.le <- bind_ora |> 
+  dplyr::filter(grepl('TNF', ID)) |> 
+  separate_longer_delim(geneID, delim = '/') |> 
+  left_join(degs.df) |> 
+  select(Cluster, geneID, avg_log2FC) |> 
+  unique() |> 
+  pivot_wider(names_from = 'geneID', values_from = 'avg_log2FC') |> 
+  column_to_rownames('Cluster')
+  
+Heatmap(t(tcell.tnf.le), name = 'log2FoldChange', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(colors = c('white', 'blue'), breaks = c(0,-2.5)), 
+        column_names_rot = 45, width = unit(4.3, "cm"), height = unit(9, 'cm'),
+        rect_gp = gpar(col = "black", lwd = 0.2), 
+        row_names_gp = gpar(fontsize = 8))
+
+antiviral.selected.umap  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                                    features = c('OAS2', 'DDX60', 
+                                                 'EIF2AK2','Antiviral.ISGs1'),
+                                    max.cutoff = 'q90', min.cutoff = 'q1', 
+                                    cols = c('lightgrey', 'red'))
+
+ggsave('results/figures/new/antiviral_umap_plot_tcell_selected.png',
+       antiviral.selected.umap, dpi = 'retina', height = 8, width = 10)
+
+tnf.selected.umap  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                                    features = c('FOS', 'JUN', 'DUSP1', 'REL'),
+                                    max.cutoff = 'q90', min.cutoff = 'q1', 
+                                    cols = c('lightgrey', 'blue'))
+
+ggsave('results/figures/new/tnf_pathway_umap_plot_tcell_selected.png',
+       tnf.selected.umap, dpi = 'retina', height = 8, width = 10)
+
+smad_targets.selected.umap  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                                    features = c('ADORA2B', 'RORA', 
+                                                 'RUNX2','LAG3'),
+                                    max.cutoff = 'q90', min.cutoff = 'q1', 
+                                    cols = c('lightgrey', 'blue'))
+
+ggsave('results/figures/new/smad_targets_umap_plot_tcell_selected.png',
+       smad_targets.selected.umap, dpi = 'retina', height = 8, width = 10)
+
+irf7_targets.selected.umap  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                                    features = c('ISG15', 'DDX60', 
+                                                 'IFIT2','NT5C3A'),
+                                    max.cutoff = 'q90', min.cutoff = 'q1', 
+                                    cols = c('lightgrey', 'red'))
+
+ggsave('results/figures/new/irf7_targets_umap_plot_tcell_selected.png',
+       irf7_targets.selected.umap , dpi = 'retina', height = 8, width = 10)
+
+#### Cytoscape network
+# UP
+edges.tcell.up  <- ora.list.up@compareClusterResult |> 
+  filter(Count >= 3) |> 
+  dplyr::select(ID, geneID) |> 
+  mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID))) |> 
+  separate_longer_delim(geneID, delim = '/') %>% 
+  mutate(weigth = 1) %>% 
+  rename(source = ID, target = geneID) |> 
+  unique()
+
+node.size <- enframe(table(edges.tcell.up$source), name = 'ID') |> 
+              mutate(size = as.double(value)) |> 
+              select(-value) |> 
+              bind_rows(edges.tcell.up |> 
+                          select(target, weigth) |>
+                          unique() |> 
+                          rename(ID = target, size = weigth))
+
+ec.up <- edges.tcell.up |> 
+  filter(source == 'EC vs nonHIC up') |> 
+  select(target) |> 
+  deframe()
+
+nodes.tcell.up <- ora.list.up@compareClusterResult %>% 
+  filter(Count >= 3) |> 
+  select(Cluster, geneID) |>
+  separate_longer_delim(geneID, delim = '/') |> 
+  unique() |> 
+  rename(ID = geneID) |> 
+  bind_rows(ora.list.up@compareClusterResult %>% 
+              filter(Count >= 3) |> 
+              select(Cluster, ID) |> 
+              mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID)))) |>
+  mutate(value = 1) |> 
+  pivot_wider(names_from = Cluster, values_from = value, values_fill = 0) |>  
+  left_join(node.size) |> 
+  mutate(name = ifelse(ID %in% c(ec.up, unique(edges.tcell.up$source)), ID , NA),
+         class = ifelse(ID %in% unique(edges.tcell.up$source), 'pathway' , 'gene')) |> 
+  rename(id = ID)
+
+createNetworkFromDataFrames(edges = edges.tcell.up,
+                            nodes = nodes.tcell.up,
+                            title = "T cell - Upregulated Pathways")
+
+# DOWN
+edges.tcell.down  <- ora.list.down@compareClusterResult |> 
+  filter(Count >= 3) |> 
+  dplyr::select(ID, geneID) |> 
+  mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID))) |> 
+  separate_longer_delim(geneID, delim = '/') %>% 
+  mutate(weigth = 1) %>% 
+  rename(source = ID, target = geneID) |> 
+  unique()
+
+node.size <- enframe(table(edges.tcell.down$source), name = 'ID') |> 
+              mutate(size = as.double(value)) |> 
+              select(-value) |> 
+              bind_rows(edges.tcell.down |> 
+                          select(target, weigth) |>
+                          unique() |> 
+                          rename(ID = target, size = weigth))
+
+ec.down <- edges.tcell.down |> 
+  filter(source == 'EC vs nonHIC down') |> 
+  select(target) |> 
+  deframe()
+
+nodes.tcell.down <- ora.list.down@compareClusterResult %>% 
+  filter(Count >= 3) |> 
+  select(Cluster, geneID) |>
+  separate_longer_delim(geneID, delim = '/') |> 
+  unique() |> 
+  rename(ID = geneID) |> 
+  bind_rows(ora.list.down@compareClusterResult %>% 
+              filter(Count >= 3) |> 
+              select(Cluster, ID) |> 
+              mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID)))) |>
+  mutate(value = 1) |> 
+  pivot_wider(names_from = Cluster, values_from = value, values_fill = 0) |>  
+  left_join(node.size) |> 
+  mutate(name = ifelse(ID %in% c(ec.down, unique(edges.tcell.down$source)), ID , NA),
+         class = ifelse(ID %in% unique(edges.tcell.down$source), 'pathway' , 'gene')) |> 
+  rename(id = ID)
+
+createNetworkFromDataFrames(edges = edges.tcell.down,
+                            nodes = nodes.tcell.down,
+                            title = "T cell - Downregulated Pathways")
+
+
+
+## ATAC - Low vs High SIV-DNA motif accessibility
+library(JASPAR2020)
+library(TFBSTools)
+
+pfm <- getMatrixSet(x = JASPAR2020,
+                    opts = list(collection = "CORE", tax_group = 'vertebrates', 
+                                all_versions = FALSE))
+
+DefaultAssay(t.cell.obj) <- 'chromvar'
+Idents(t.cell.obj) <- t.cell.obj$manual.annotation.fine
+
+motif.list <- list()
+idents <- levels(Idents(t.cell.obj))
+
+for(i in seq_along(idents)) {
+    motif.list[[i]] <- FindMarkers(t.cell.obj, 
+                                  ident.1 = "low", 
+                                  ident.2 = "high",
+                                  group.by = 'siv.dna.group', 
+                                  subset.ident = idents[i],
+                                  mean.fxn = rowMeans,
+                                  fc.name = "avg_diff")
+}
+
+names(motif.list) <- idents
+
+motif.list.name <- bind_rows(motif.list, .id = 'id') %>% 
+  rownames_to_column('name') %>% 
+  mutate(name = sub('\\.\\.\\..*', '', name)) %>% 
+  left_join(enframe(name(pfm))) %>% 
+  dplyr::filter(p_val_adj < 0.05)
+
+motif.mat <- motif.list.name |> 
+  dplyr::select(id, value, avg_diff) |> 
+  pivot_wider(names_from = 'id', values_from = 'avg_diff') |> 
+  arrange(value) |> 
+  column_to_rownames('value')
+
+motif.mat <- motif.mat[which(rowSums(is.na(motif.mat)) <= ncol(motif.mat)* 2/3),]
+motif.mat <- motif.mat[, which(colSums(is.na(motif.mat)) <= nrow(motif.mat)*0.9)]
+
+#motif.mat <- motif.mat[which(rowSums(!is.na(motif.mat)) > ncol(motif.mat)* 0.5),]
+#motif.mat <- motif.mat[, which(colSums(is.na(motif.mat)) <= nrow(motif.mat)*0.9)]
+
+motif.mat.to.cluster <- motif.list.name |> 
+  dplyr::select(id, value, avg_diff) |> 
+  dplyr::filter(value %in% rownames(motif.mat),
+         id %in% colnames(motif.mat)) |> 
+  pivot_wider(names_from = 'id', values_from = 'avg_diff', values_fill = 0) |> 
+  column_to_rownames('value') |> 
+  as.matrix()
+
+clust.row  <- hclust(dist(motif.mat.to.cluster)) 
+clust.column  <- hclust(dist(t(motif.mat.to.cluster)))
+
+col.order <- clust.column$labels[clust.column$order]
+row.order <- clust.row$labels[clust.row$order]
+
+motif.mat.ordered <- motif.mat[row.order, col.order]
+
+motif.of.interest <- c('STAT1', 'STAT3', 'IRF3', 'IRF7', 'FOS', 'FOS::JUN', 
+                       'MAF::NFE2', "Smad2::Smad3", "GATA3", "TCF7")
+
+#motif.of.interest <- motif.list.name |> 
+#  dplyr::filter(id %in% colnames(motif.mat), 
+#                value %in% rownames(motif.mat)) |> 
+#  group_by(id) |> 
+  #slice_max(abs(avg_diff), n = 5) |> 
+#  slice_min(p_val, n = 5) |> 
+#  ungroup() |>  
+#  dplyr::select(value) |> 
+#  deframe()
+
+motif.position <- which(rownames(motif.mat.ordered) %in% motif.of.interest)
+
+ha = rowAnnotation(foo = anno_mark(at = motif.position, 
+    labels = rownames(motif.mat.ordered)[motif.position]))
+
+Heatmap(motif.mat.ordered, name = 'FC', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(breaks = c(-2, -1,  0, 1, 2), 
+                         c('darkblue', 'blue', 'white', 'red', 'darkred')), 
+        show_row_names = F, width = unit(5, 'cm'),
+        height = unit(10, 'cm'), right_annotation = ha, column_names_rot = 60)
+
+smad.plot <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                             features = 'MA1622.1', max.cutoff = 'q95',
+                             min.cutoff = 'q10', cols = c('lightgrey', 'blue')) +   ggtitle('Smad2::Smad3')
+fosjun.plot <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                             features = 'MA0099.3', max.cutoff = 'q95',
+                             min.cutoff = 'q10', cols = c('lightgrey', 'blue')) +   ggtitle('FOS::JUN')
+irf7.plot <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                             features = 'MA0772.1', max.cutoff = 'q95',
+                             min.cutoff = 'q10', cols = c('lightgrey', 'red')) +   ggtitle('IRF7')
+stat1.plot <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                             features = 'MA0137.3', max.cutoff = 'q95',
+                             min.cutoff = 'q10', cols = c('lightgrey', 'red')) +   ggtitle('STAT1')
+
+t.cell.atac.plot.selected <- smad.plot +  fosjun.plot + irf7.plot + stat1.plot +   
+  plot_layout(ncol = 2)
+
+#ggsave('results/figures/new/umap_atac_tcell_seleteced.png', t.cell.atac.plot.selected, 
+#       dpi = 'retina', width = 8, height = 6)
+library(BSgenome.Mmulatta.UCSC.rheMac10)
+seqnames(Mmulatta) <- sub('chr', '', seqnames(Mmulatta))
+
+DefaultAssay(t.cell.obj) <- 't.cell.peaks'
+
+bone <- Footprint(
+  object = t.cell.obj,
+  motif.name = c("GATA2", "CEBPA", "EBF1"),
+  genome = Mmulatta
+)
+```
+
+```{r Myeloid cells}
+ln.obj <- readRDS('data/processed/new/ln.integrated.annot.geneactivity.chromvar.rds')
+
+myeloid.obj <- subset(ln.obj,  
+                      subset = manual.annotation %in% 
+                        c('Monocytes/Macrophages', 'FDC', 'pDC'))
+
+myeloid.markers <- readxl::read_excel('data/raw/human.cell.surface.markers.xlsx',
+                                     sheet = 'myeloid.subsets')
+
+myeloid.obj <- FindClusters(myeloid.obj, graph.name = "wsnn", 
+                            algorithm = 3, resolution = 0.5)
+
+DimPlot(myeloid.obj, reduction = 'wnn.umap', label = T, label.box = T, repel = T) + NoLegend()
+
+DotPlot(myeloid.obj,  features = c(myeloid.markers$gene.symbol, 'SIGLEC1', 'MAF'), 
+        cluster.idents = T, dot.min = 0.01, scale.by = 'size', assay = 'RNA') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_viridis_c(option = 'H')
+
+manual.annotation <- myeloid.obj@meta.data %>% 
+  mutate(manual.annotation.fine = case_when(seurat_clusters %in% c('0', '2', '6') ~ 'FDCs',
+                                            seurat_clusters == '3' ~ 'pDCs',
+                                            seurat_clusters %in% c('5', '4') ~ 'DCs',
+                                            seurat_clusters == '1' ~ 'Macrophages'))
+
+myeloid.obj$manual.annotation.fine <- manual.annotation$manual.annotation.fine
+
+myeloid.umap <- DimPlot(myeloid.obj, reduction = 'wnn.umap', 
+                        group.by = 'manual.annotation.fine',
+                        label = T, label.box = T, repel = T) + NoLegend()
+
+myeloid.cells <- CellSelector(myeloid.umap)
+
+myeloid.obj <- myeloid.obj[,myeloid.cells]
+
+umap.myeloid <- DimPlot(myeloid.obj, group.by = 'manual.annotation.fine',   
+        reduction = 'wnn.umap', label.size = 5, 
+        cols = RColorBrewer::brewer.pal(4,'Dark2')) + ggtitle('Myeloid subsets')
+
+#ggsave('results/figures/new/umap_myeloid_subsets.png', 
+#       umap.myeloid, scale = 0.5, dpi = 'retina', bg = 'white')
+
+#saveRDS(myeloid.obj, 'data/processed/new/myeloid_integrated.rds')
+
+myeloid.obj <- readRDS('data/processed/new/myeloid_integrated.rds')
+
+#### GEX
+Idents(myeloid.obj) <- myeloid.obj$manual.annotation.fine
+idents <- levels(Idents(myeloid.obj))
+degs.list <- list()
+for(i in 1:length(idents)) {
+    degs.list[[i]] <- FindMarkers(myeloid.obj, 
+                                  ident.1 = "low", 
+                                  ident.2 = "high",
+                                  group.by = 'siv.dna.group', 
+                                  subset.ident = idents[i])
+}
+names(degs.list) <- idents
+
+# ORA
+gene.list.up <- list()
+gene.list.down <- list()
+for(i in seq_along(degs.list)) {
+  
+  gene.list.up[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC > 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+  
+  gene.list.down[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC < 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+}
+names(gene.list.up) <- names(degs.list)
+names(gene.list.down) <- names(degs.list)
+
+gene.list.up <- compact(gene.list.up)
+gene.list.down <- compact(gene.list.down)
+
+
+ec_mono_pathways <- readxl::read_excel('data/raw/DEG_monocytes_EC vs non-HIC.xlsx') 
+
+ec_mono_geneset <- ec_mono_pathways |> 
+  unite('gs_name', c(comparison, regulation)) |> 
+  dplyr::select(gs_name, gene) |> 
+  rename(gene_symbol = gene) |> 
+  arrange(gs_name, gene_symbol) |> 
+  unique()
+
+manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx') |> 
+  mutate(gs_name = sub('(_Schoggins_2011|_Abdel-Mohsen_2015)', '', gs_name))
+
+epigenetic <- read.gmt('data/raw/gene_signatures/Epigenetic.gmt') |> 
+  filter(gene != '') |> 
+  rename(gs_name = term, gene_symbol = gene)
+
+kg_epigenetic <- read.gmt('data/raw/gene_signatures/kg_epigenetics.gmt.txt') |> 
+  filter(gene != '') |> 
+  rename(gs_name = term, gene_symbol = gene)
+
+gene_set_c3 <-msigdbr::msigdbr(category = 'C3')  |> 
+  filter(grepl('TFT:TFT_Legacy', gs_subcat)) |> 
+  select(gs_name, gene_symbol) %>%
+  unique()
+
+gene_set_h_manual <- msigdbr::msigdbr(category = 'H') %>% 
+  select(gs_name, gene_symbol) %>% 
+  bind_rows(manual_pathways %>% 
+              select(gs_name, gene_symbol)) %>% 
+  bind_rows(ec_mono_geneset) |> 
+#  bind_rows(epigenetic) |> 
+#  bind_rows(kg_epigenetic) |> 
+#  bind_rows(gene_set_c3) |> 
+  unique()
+
+ora.list.up <- compareCluster(gene.list.up, fun = 'enricher', 
+                              TERM2GENE = gene_set_h_manual,
+                              universe = rownames(myeloid.obj))
+
+ora.list.down <- compareCluster(gene.list.down, fun = 'enricher', 
+                                TERM2GENE = gene_set_h_manual,
+                                universe = rownames(myeloid.obj))
+
+ora.plot.up <- dotplot(ora.list.up %>% filter(Count >= 3) %>% 
+                         mutate(Description = sub('HALLMARK', '', Description)), 
+        label_format = 50, size = 'Count', showCategory = Inf) +
+  scale_fill_gradient(low = 'red4', high = 'indianred1') + 
+  labs(x = '') +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+#ggsave('results/figures/new/dotplot_ORA_myeloid.ln_ECsignature_up.pdf', ora.plot.up,
+#       device = 'pdf', height = 4, width = 5.5)
+
+genes.up.network <- cnetplot(ora.list.up %>% filter(Count >= 3), shadowtext = 'none',
+                             cex.params = list(category_node = 0.3, gene_node = 0.1))
+
+#ggsave('results/figures/new/network_ora_up_myeloid.ln.pdf', genes.up.network,
+#       scale = 0.6, device = 'pdf')
+
+
+ora.plot.down <- dotplot(ora.list.down %>% filter(Count >= 3) %>% 
+                         mutate(Description = sub('HALLMARK', '', Description)), 
+        label_format = 50, size = 'Count',  showCategory = Inf) +
+  scale_fill_gradient(low = 'blue4', high = 'skyblue') + 
+  labs(x = '') +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+#ggsave('results/figures/new/dotplot_ORA_myeloid.ln_ECsignature_down.pdf', 
+#       ora.plot.down, device = 'pdf', height = 4, width = 5)
+
+genes.down.network <- cnetplot(ora.list.down %>% filter(Count >= 3), shadowtext = 'none',
+                             cex.params = list(category_node = 0.3, gene_node = 0.1))
+
+#ggsave('results/figures/new/network_ora_down_myeloid.ln.pdf', genes.down.network,
+#       scale = 0.6, device = 'pdf')
+
+
+
+bind_ora <- bind_rows(list(up = ora.list.up@compareClusterResult,
+                    down = ora.list.down@compareClusterResult), .id = 'id') |> 
+  filter(Count >= 3) |> 
+  mutate(ID = sub('HALLMARK_', '', ID))
+
+mat <- bind_ora %>% 
+  dplyr::mutate(Count = ifelse(id == 'down', -1, 1)) |> 
+  select(Cluster, ID, Count) |> 
+  pivot_wider(names_from = Cluster, values_from = Count, values_fill = 0) |>
+  column_to_rownames('ID') |> 
+  as.matrix()
+   
+clust.row  <- hclust(dist(mat) ) 
+clust.column  <- hclust(dist(t(mat)) )
+
+dotplot <- bind_ora |> 
+  dplyr::mutate(ID = factor(ID, levels = clust.row$labels[clust.row$order]),
+                Cluster = factor(Cluster, levels = clust.column$labels[clust.column$order])) |> 
+  ggplot(aes(x = Cluster, y = ID)) + 
+         geom_point(aes(size = Count, fill = id), shape = 21) +
+         theme_bw(base_size = 12) +
+         scale_fill_manual(values = c('blue', 'red'), name = 'Direction',
+                           labels = c('Downregulated', 'Upregulated')) +
+  labs(x = '', y = '')+
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 13)) 
+
+ggsave('results/figures/new/dotplot_ORA_myeloid.ln.pdf', dotplot,
+       device = 'pdf', scale = 0.7)
+
+### Represent leading edge genes
+degs.df <- bind_rows(lapply(degs.list, 
+                            function(x) x |> 
+                              rownames_to_column('geneID')), .id = 'Cluster') |> 
+  dplyr::select(Cluster, geneID, p_val_adj, avg_log2FC)
+
+myeloid.antiviral.le <- bind_ora |> 
+  dplyr::filter(grepl('ANTIVIRAL', ID)) |> 
+  separate_longer_delim(geneID, delim = '/') |> 
+  left_join(degs.df) |> 
+  select(Cluster, geneID, avg_log2FC) |> 
+  unique() |> 
+  pivot_wider(names_from = 'geneID', values_from = 'avg_log2FC') |> 
+  column_to_rownames('Cluster')
+  
+Heatmap(t(myeloid.antiviral.le), name = 'log2FoldChange', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(colors = c('white', 'red'), breaks = c(0,4)), 
+        column_names_rot = 45, width = unit(1.5, "cm"), height = unit(9, 'cm'),
+        rect_gp = gpar(col = "black", lwd = 0.2), 
+        row_names_gp = gpar(fontsize = 8))
+
+myeloid.tnf.le <- bind_ora |> 
+  dplyr::filter(grepl('TNF', ID)) |> 
+  separate_longer_delim(geneID, delim = '/') |> 
+  left_join(degs.df) |> 
+  select(Cluster, geneID, avg_log2FC) |> 
+  unique() |> 
+  pivot_wider(names_from = 'geneID', values_from = 'avg_log2FC') |> 
+  column_to_rownames('Cluster')
+  
+Heatmap(t(myeloid.tnf.le), name = 'log2FoldChange', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(colors = c('white', 'blue'), breaks = c(0,-2)), 
+        column_names_rot = 45, width = unit(1.5, "cm"), height = unit(7, 'cm'),
+        rect_gp = gpar(col = "black", lwd = 0.2), 
+        row_names_gp = gpar(fontsize = 8))
+
+antiviral.umap.plot.myeloid.selected  <- FeaturePlot(myeloid.obj, reduction = 'wnn.umap', 
+                                    features = c('DDX60', 'IFI44L', 'IFI6', 'Antiviral.ISGs1'), 
+                                    max.cutoff = 'q90', min.cutoff = 'q1', 
+                                    cols = c('lightgrey', 'red'))
+
+#ggsave('results/figures/new/antiviral_umap_plot_myeloid_selected.png', 
+#       antiviral.umap.plot.myeloid.selected, dpi = 'retina', width = 9, height = 7)
+
+tnf.umap.plot.myeloid.selected  <- FeaturePlot(myeloid.obj, 
+                                               reduction = 'wnn.umap', 
+                                    features = c('FOS', 'DUSP1', 
+                                                 'KLF4', 'FOSB'), 
+                                    max.cutoff = 'q90', min.cutoff = 'q1', 
+                                    cols = c('lightgrey', 'blue'))
+
+ggsave('results/figures/new/tnf_umap_plot_myeloid_selected.png', 
+       tnf.umap.plot.myeloid.selected , dpi = 'retina', width = 9, height = 7)
+
+#### Cytoscape network
+# UP
+edges.myeloid.up  <- ora.list.up@compareClusterResult |> 
+  filter(Count >= 3) |> 
+  dplyr::select(ID, geneID) |> 
+  mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID))) |> 
+  separate_longer_delim(geneID, delim = '/') %>% 
+  mutate(weigth = 1) %>% 
+  rename(source = ID, target = geneID) |> 
+  unique()
+
+node.size <- enframe(table(edges.myeloid.up$source), name = 'ID') |> 
+              mutate(size = as.double(value)) |> 
+              select(-value) |> 
+              bind_rows(edges.myeloid.up |> 
+                          select(target, weigth) |>
+                          unique() |> 
+                          rename(ID = target, size = weigth))
+
+ec.up <- edges.myeloid.up |> 
+  filter(source == 'EC vs nonHIC up') |> 
+  select(target) |> 
+  deframe()
+
+nodes.myeloid.up <- ora.list.up@compareClusterResult %>% 
+  filter(Count >= 3) |> 
+  select(Cluster, geneID) |>
+  separate_longer_delim(geneID, delim = '/') |> 
+  unique() |> 
+  rename(ID = geneID) |> 
+  bind_rows(ora.list.up@compareClusterResult %>% 
+              filter(Count >= 3) |> 
+              select(Cluster, ID) |> 
+              mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID)))) |>
+  mutate(value = 1) |> 
+  pivot_wider(names_from = Cluster, values_from = value, values_fill = 0) |>  
+  left_join(node.size) |> 
+  mutate(name = ifelse(ID %in% c(ec.up, unique(edges.myeloid.up$source)), ID , NA),
+         class = ifelse(ID %in% unique(edges.myeloid.up$source), 'pathway' , 'gene')) |> 
+  rename(id = ID)
+
+createNetworkFromDataFrames(edges = edges.myeloid.up,
+                            nodes = nodes.myeloid.up,
+                            title = "Myeloid - Upregulated Pathways")
+
+# DOWN
+edges.myeloid.down  <- ora.list.down@compareClusterResult |> 
+  filter(Count >= 3) |> 
+  dplyr::select(ID, geneID) |> 
+  mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID))) |> 
+  separate_longer_delim(geneID, delim = '/') %>% 
+  mutate(weigth = 1) %>% 
+  rename(source = ID, target = geneID) |> 
+  unique()
+
+node.size <- enframe(table(edges.myeloid.down$source), name = 'ID') |> 
+              mutate(size = as.double(value)) |> 
+              select(-value) |> 
+              bind_rows(edges.myeloid.down |> 
+                          select(target, weigth) |>
+                          unique() |> 
+                          rename(ID = target, size = weigth))
+
+ec.down <- edges.myeloid.down |> 
+  filter(source == 'EC vs nonHIC down') |> 
+  select(target) |> 
+  deframe()
+
+nodes.myeloid.down <- ora.list.down@compareClusterResult %>% 
+  filter(Count >= 3) |> 
+  select(Cluster, geneID) |>
+  separate_longer_delim(geneID, delim = '/') |> 
+  unique() |> 
+  rename(ID = geneID) |> 
+  bind_rows(ora.list.down@compareClusterResult %>% 
+              filter(Count >= 3) |> 
+              select(Cluster, ID) |> 
+              mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID)))) |>
+  mutate(value = 1) |> 
+  pivot_wider(names_from = Cluster, values_from = value, values_fill = 0) |>  
+  left_join(node.size) |> 
+  mutate(name = ifelse(ID %in% c(ec.down, unique(edges.myeloid.down$source)), ID , NA),
+         class = ifelse(ID %in% unique(edges.myeloid.down$source), 'pathway' , 'gene')) |> 
+  rename(id = ID)
+
+createNetworkFromDataFrames(edges = edges.myeloid.down,
+                            nodes = nodes.myeloid.down,
+                            title = "Myeloid - Downregulated Pathways")
+
+
+## ATAC Low vs High SIV-DNA chromatin accessibility
+DefaultAssay(myeloid.obj) <- 'chromvar'
+
+Idents(myeloid.obj) <- myeloid.obj$manual.annotation.fine
+
+motif.list <- list()
+idents <- levels(Idents(myeloid.obj))
+
+for(i in seq_along(idents)) {
+    motif.list[[i]] <- FindMarkers(myeloid.obj, 
+                                  ident.1 = "low", 
+                                  ident.2 = "high",
+                                  group.by = 'siv.dna.group', 
+                                  subset.ident = idents[i],
+                                  mean.fxn = rowMeans,
+                                  fc.name = "avg_diff")
+}
+
+names(motif.list) <- idents
+
+motif.list.name <- bind_rows(motif.list, .id = 'id') %>% 
+  rownames_to_column('name') %>% 
+  mutate(name = sub('\\.\\.\\..*', '', name)) %>% 
+  left_join(enframe(name(pfm))) |> 
+  dplyr::filter(p_val_adj < 0.05)
+
+motif.mat <- motif.list.name |> 
+  dplyr::select(id, value, avg_diff) |> 
+  pivot_wider(names_from = 'id', values_from = 'avg_diff') |> 
+  arrange(value) |> 
+  column_to_rownames('value')
+
+#motif.mat <- motif.mat[which(rowSums(is.na(motif.mat)) < ncol(motif.mat)* 2/3),]
+#motif.mat <- motif.mat[, which(colSums(is.na(motif.mat)) < nrow(motif.mat)*0.9)]
+
+motif.mat.to.cluster <- motif.list.name |> 
+  dplyr::select(id, value, avg_diff) |> 
+  dplyr::filter(value %in% rownames(motif.mat),
+         id %in% colnames(motif.mat)) |> 
+  pivot_wider(names_from = 'id', values_from = 'avg_diff', values_fill = 0) |> 
+  column_to_rownames('value') |> 
+  as.matrix()
+
+clust.row  <- hclust(dist(motif.mat.to.cluster)) 
+clust.column  <- hclust(dist(t(motif.mat.to.cluster)))
+
+col.order <- clust.column$labels[clust.column$order]
+row.order <- clust.row$labels[clust.row$order]
+
+motif.mat.ordered <- motif.mat[row.order, col.order]
+
+motif.of.interest <- c("IRF7",  "IRF8",  "IRF9",  "IRF4",  "IRF2",  
+                       "IRF6",  "Stat6", "Stat2")
+
+motif.of.interest <- motif.list.name |> 
+  group_by(id) |> 
+  slice_max(abs(avg_diff), n = 5) |> 
+  ungroup() |>  
+  dplyr::select(value) |> 
+  deframe()
+
+motif.position <- which(rownames(motif.mat.ordered) %in% motif.of.interest)
+
+ha = rowAnnotation(foo = anno_mark(at = motif.position, 
+    labels = rownames(motif.mat.ordered)[motif.position]))
+
+Heatmap(motif.mat.ordered, name = 'FC', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(breaks = c(-2, -1,  0, 1, 2), 
+                         c('darkblue', 'blue', 'white', 'red', 'darkred')), 
+        show_row_names = F, width = unit(4, 'cm'), row_names_gp = gpar(fontsize = 6),
+        row_names_side = "left",
+        height = unit(12, 'cm'), right_annotation = ha, column_names_rot = 60, )
+
+irf4.plot <-     FeaturePlot(myeloid.obj, reduction = 'wnn.umap', 
+                              features = 'MA1419.1',  max.cutoff = 'q95', 
+                             min.cutoff = 'q10', cols = c('lightgrey', 'red')) + ggtitle('IRF4')
+irf7.plot <-     FeaturePlot(myeloid.obj, reduction = 'wnn.umap', 
+                             features = 'MA0772.1', max.cutoff = 'q95',
+                             min.cutoff = 'q10', cols = c('lightgrey', 'red')) +   ggtitle('IRF7')
+fos.plot <-     FeaturePlot(myeloid.obj, reduction = 'wnn.umap', 
+                             features = 'MA0476.1', max.cutoff = 'q95',
+                             min.cutoff = 'q10', cols = c('lightgrey', 'blue')) +   ggtitle('FOS')
+rfx2.plot <-     FeaturePlot(myeloid.obj, reduction = 'wnn.umap', 
+                             features = 'MA0600.2', max.cutoff = 'q95',
+                             min.cutoff = 'q10', cols = c('lightgrey', 'blue')) +   ggtitle('RFX2')
+
+myeloid.atac.plot.selected <-  irf4.plot + irf7.plot + fos.plot + rfx2.plot  +
+  plot_layout(ncol = 2)
+
+ggsave('results/figures/new/umap_atac_myeloid_selected.png', 
+       myeloid.atac.plot.selected, dpi = 'retina', height = 6, width = 8)
+
+```
+
+```{r GEX/ATAC - Correl}
+ln.obj <- readRDS('data/processed/new/ln.integrated.annot.geneactivity.chromvar.rds')
+
+rna.atac.aggr <- AggregateExpression(ln.obj, assays = c('RNA', 'gene.activity'))
+
+rna.vst <- DESeq2::vst(as.matrix(rna.atac.aggr$RNA))
+rna.vst.scaled <- t(scale(t(rna.vst)))
+
+atac.vst <- DESeq2::vst(as.matrix(rna.atac.aggr$gene.activity))
+atac.vst.scaled <- t(scale(t(atac.vst)))
+
+# select top 5000 high variable genes
+top.var <- names(sort(apply(rna.vst, 1, var), decreasing = T)[1:5000])
+
+rna.df <- rna.vst.scaled |> 
+  as.data.frame() |> 
+  rownames_to_column('genesymbol') |> 
+  filter(genesymbol %in% top.var) |> 
+  pivot_longer(-genesymbol) |> 
+  unite('gene_subset', genesymbol:name)
+
+atac.df <- atac.vst.scaled |> 
+  as.data.frame() |> 
+  rownames_to_column('genesymbol') |> 
+  pivot_longer(-genesymbol) |> 
+  unite('gene_subset', genesymbol:name)
+
+top.var.rna.atac <- rna.df |> 
+  inner_join(atac.df, by = 'gene_subset', suffix = c('_rna', '_atac'))
+
+atac.gex.p <- top.var.rna.atac |> 
+  ggplot(aes(x = value_rna, y = value_atac)) +
+  geom_point(size = 0.1) +
+  geom_smooth(method = 'lm') +
+  stat_cor(method = 'pearson', label.y = 3.3) +
+  ylab('z-score ATAC Gene activity') +
+  xlab('z-score Gene expression') +
+  theme(axis.title = element_text(size = 13),
+        axis.text = element_text(size = 11))
+
+ggsave('results/figures/new/scatter_plot_gex_atac_correl.png', atac.gex.p,
+       scale = 0.4, dpi = 'retina')
+
+```
+
+```{r CellChat}
+library(CellChat)
+### Add fine annotation for T cells
+ln.obj <- readRDS('data/processed/new/ln.integrated.annot.geneactivity.chromvar.rds')
+
+ln.obj <- FindClusters(ln.obj, graph.name = "wsnn", algorithm = 3, 
+                       resolution = 1.5, verbose = FALSE)
+
+DimPlot(ln.obj, reduction = 'wnn.umap', group.by = 'seurat_clusters', 
+        label = T, label.box = T) + NoLegend()
+
+cell.markers <- readxl::read_excel('data/raw/human.cell.surface.markers.xlsx',
+                                     sheet = 'human.cell.surface.markers')
+
+DotPlot(ln.obj, group.by = 'seurat_clusters',
+        features = c(unique(cell.markers$gene.symbol), 
+                     "TBX21", "CXCR3", "IFNG", "CCR4", "GATA3", "PTGDR2", "IL4",
+                     "RORC", "IL17A", "CCR6", "FOXP3", "IL7R", "IL2RA", "TGFB1", 
+                     "TGFB3", "BCL6", "CXCR5", "ICOS", "PDCD1", "IL21", "B3GAT1", 
+                     "A4GALT", "CD38", "ICAM1"), 
+        cluster.idents = T, dot.min = 0.01, scale.by = 'size', assay = 'RNA') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_viridis_c(option = 'H')
+
+t.cell.fine.annotation <- t.cell.obj@meta.data |> 
+  rownames_to_column('cellbarcode') |> 
+  select('cellbarcode', 'manual.annotation.fine')
+
+myeloid.cell.fine.annotation <- myeloid.obj@meta.data |> 
+  rownames_to_column('cellbarcode') |> 
+  select('cellbarcode', 'manual.annotation.fine')
+
+manual.annotation <- ln.obj@meta.data %>%
+  rownames_to_column('cellbarcode') |>
+  left_join(bind_rows(t.cell.fine.annotation, myeloid.cell.fine.annotation)) |> 
+  mutate(manual.annotation.fine = case_when(seurat_clusters == '32' ~ 'Plasma cells',
+                                            seurat_clusters %in% c('25', '30') ~ 'GC B cells',
+                                            seurat_clusters %in% c('23', '8') ~ 'Memory B cells',
+                                            seurat_clusters %in% c('0', '1', '3', '9') ~ 'Naive B cells',
+                                            seurat_clusters == '31' ~ 'NK',
+                                            TRUE ~ manual.annotation.fine)) |> 
+  mutate(manual.annotation.fine = ifelse(is.na(manual.annotation.fine),
+                                         'CD8 T Eff/Mem', manual.annotation.fine))
+
+#write_tsv(manual.annotation, 'data/processed/new/manual_annotation_fine.tsv')
+manual.annotation <- read_tsv('data/processed/new/manual_annotation_fine.tsv')
+
+ln.obj$manual.annotation.fine <- manual.annotation$manual.annotation.fine
+Idents(ln.obj) <- ln.obj$manual.annotation.fine
+
+DimPlot(ln.obj, group.by = 'manual.annotation', label = T, repel = T, 
+        reduction = 'wnn.umap', label.box = T) + 
+  NoLegend()
+
+#saveRDS(ln.obj, 
+#        'data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar.rds')
+#ln.obj <- read_rds('data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar.rds')
+
+manual.annot <- ln.obj@meta.data |> 
+  mutate(manual.annotation = case_when(manual.annotation.fine %in% c('Naive B cells', 
+                                                                    'Memory B cells') ~ 'B cells',
+                                       manual.annotation.fine == 'GC B cells' ~ 'GC B cells',
+                                       manual.annotation.fine == 'Plasma cells' ~ 'Plasma cells',
+                                       manual.annotation.fine == 'FDCs' ~ 'FDCs',
+                                       manual.annotation.fine == 'pDCs' ~ 'pDCs',
+                                       manual.annotation.fine == 'DCs' ~ 'DCs',
+                                       manual.annotation.fine == 'Macrophages' ~ 'Macrophages',
+                                       manual.annotation.fine == 'Cycling CD4/CD8' ~ 'Cycling CD4/CD8',
+                                       manual.annotation.fine == 'CD8 T Eff/Mem' ~ 'CD8 T Eff/Mem',
+                                       manual.annotation.fine == 'NK' ~ 'NK',
+                                       manual.annotation.fine %in% c('Tfh', 'Treg', 'Th1', 'Th2/Th17', 
+                                                                     'CD4 T Intermediate') ~ 'CD4 T Eff/Mem',
+                                       manual.annotation.fine == 'CD4 T Naive' ~ 'CD4 T Naive',
+                                       manual.annotation.fine == 'CD8 T Naive' ~ 'CD8 T Naive'))
+
+ln.obj$manual.annotation <- manual.annot$manual.annotation
+
+umap <- DimPlot(ln.obj, group.by = 'manual.annotation', label = T, repel = T,  
+        reduction = 'wnn.umap', label.size = 5) + NoLegend()
+
+#ggsave('results/figures/new/umap_ln_manual_annotation_v2.png', umap,  dpi = 'retina',
+#       width = 7, height = 5.5)
+
+Idents(ln.obj) <- ln.obj$manual.annotation
+
+cell.markers <- readxl::read_excel('data/raw/human.cell.surface.markers.xlsx',
+                                     sheet = 'human.cell.surface.markers')
+
+cluster.annot.plot <- DotPlot(ln.obj, 
+        features = c(unique(cell.markers$gene.symbol)[-34],
+                     "TBX21", "CXCR3", "IFNG", "CCR4", "GATA3", "IL4",
+                     "RORC", "IL17A", "CCR6", "FOXP3", "IL7R", "IL2RA", "TGFB1", "TGFB3",
+                     "BCL6", "CXCR5", "ICOS", "PDCD1", "IL21", "B3GAT1", "A4GALT", "CD38", "ICAM1"), 
+        cluster.idents = T, dot.min = 0.01, scale.by = 'size', assay = 'RNA') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 9)) +
+  scale_color_viridis_c(option = 'H') + xlab('') + ylab('Subset')
+
+ggsave('results/figures/new/dotplot_cluster_annotation_ln_v2.pdf', cluster.annot.plot,
+       height = 4.5, width = 12, bg = 'white')
+
+### Find marker genes
+Idents(ln.obj) <- ln.obj$manual.annotation
+
+ln.obj.markers.rna <- FindAllMarkers(ln.obj, only.pos = T, 
+                                     logfc.threshold = 0.25) |> 
+  dplyr::filter(p_val_adj < 0.05) 
+
+#### Heatmap with all ISGs differentially expressed between cell types
+gene_set_h <- msigdbr::msigdbr(category = 'H') |> 
+  dplyr::select(gs_name, gene_symbol) %>% 
+  unique()
+
+gene_set_c <- msigdbr::msigdbr(category = 'C2') %>% 
+  filter(grepl('CP:', gs_subcat)) %>% 
+  select(gs_name, gene_symbol) %>% 
+  unique()
+
+ifn.pathways <- c('REACTOME_INTERFERON_ALPHA_BETA_SIGNALING', 
+                  'REACTOME_INTERFERON_GAMMA_SIGNALING', 
+                  'REACTOME_INTERFERON_SIGNALING',
+                  'WP_INTERFERON_TYPE_I_SIGNALING_PATHWAYS',
+                  'WP_TYPE_III_INTERFERON_SIGNALING',
+                  'WP_TYPE_II_INTERFERON_SIGNALING_IFNG',
+                  'HALLMARK_INTERFERON_ALPHA_RESPONSE',
+                  'HALLMARK_INTERFERON_GAMMA_RESPONSE')
+
+isg.list <- gene_set_h |> 
+  bind_rows(gene_set_c) |> 
+  dplyr::filter(gs_name %in% ifn.pathways) |> 
+  dplyr::select(gene_symbol) |> 
+  unique() |> 
+  arrange(gene_symbol) |> 
+  deframe()
+
+ln.obj.markers.rna.isg <- ln.obj.markers.rna |> 
+  filter(gene %in% isg.list)
+
+#write_tsv(ln.obj.markers.rna.isg, 
+#          'results/figures/new/IFN_related_genes_LN_markers.tsv')
+
+#write_tsv(ln.obj.markers.rna, 
+#          'results/figures/new/DEGs_LN_celltpe_markers.tsv')
+
+ifn.avg.expr <- AverageExpression(ln.obj, 
+                                  features = unique(ln.obj.markers.rna.isg$gene), 
+                                  assays = 'RNA')$RNA
+
+scaled.expr = t(scale(t(as.matrix(log1p(ifn.avg.expr)))))
+
+library(ComplexHeatmap)
+library(circlize)
+col_fun = colorRamp2(c(-4, -2, 0, 2, 4), c('darkblue', 'blue', 'white', 'red', 'darkred'))
+
+genes.of.interest <- ln.obj.markers.rna.isg |> 
+  group_by(cluster) |> 
+  slice_max(avg_log2FC, n = 5) |> 
+  ungroup() |> 
+  select(gene) |> 
+  deframe() |> 
+  unique()
+  
+motif.position <- which(rownames(scaled.expr) %in% genes.of.interest)
+
+ha = rowAnnotation(foo = anno_mark(at = motif.position, 
+                                   labels = rownames(scaled.expr)[motif.position],
+                                   labels_gp = gpar(fontsize = 5)))
+
+Heatmap(scaled.expr, name = "z-score\nAvg. Expr.",
+        column_names_gp = gpar(fontsize = 8),
+        show_row_names = F, col = col_fun,
+        #row_names_gp = gpar(fontsize = 2),
+        column_names_rot = 45,
+        heatmap_width = unit(9, "cm"), 
+        heatmap_height =  unit(20, "cm"), 
+        clustering_method_rows = "ward.D2", 
+        right_annotation = ha,
+        clustering_method_columns = "ward.D2", 
+        #column_split =  2, 
+        #row_split = 2, 
+        border = TRUE)
+
+#saveRDS(ln.obj, 
+#        'data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar_v2.rds')
+ln.obj <- readRDS('data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar_v2.rds')
+
+DefaultAssay(ln.obj) <- 'peaks'
+Idents(ln.obj) <- ln.obj$manual.annotation
+
+ifn.genes.peaks = c("IFNG", "IFNA8", "IFNA6", "IFNA14", "IFNA16", "IFNB1", "IFNK", "IFNL1")
+
+cvg.plot.ifn <- CoveragePlot(ln.obj, region = ifn.genes.peaks, ymax = 50, peaks = F, ncol = 2) 
+
+ggsave('coverage_plot_interferon.pdf', cvg.plot.ifn, width = 6.5, height = 12)
+
+inf.expr <- FeaturePlot(ln.obj, reduction = 'wnn.umap', 
+            features = c('IFNG', 'IFNL1'), max.cutoff = 'q90',
+            cols = c('lightgrey', 'red'))
+
+ggsave('ifn_expression.png', inf.expr, width = 7, height = 3.5)
+
+#### GEX Low vs High SIV-DNA
+DefaultAssay(ln.obj) <- 'RNA'
+Idents(ln.obj) <- ln.obj$manual.annotation.fine
+idents <- levels(Idents(ln.obj))
+degs.list <- list()
+for(i in 1:length(idents)) {
+    degs.list[[i]] <- FindMarkers(ln.obj, 
+                                  ident.1 = "low", 
+                                  ident.2 = "high",
+                                  group.by = 'siv.dna.group', 
+                                  subset.ident = idents[i])
+}
+names(degs.list) <- idents
+
+degs.list.df <- bind_rows(degs.list, .id = 'cell_type') |> 
+  rownames_to_column('geneid') |> 
+  mutate(geneid = sub('\\..*', '', geneid)) |> 
+  filter(p_val_adj < 0.1)
+
+write_tsv(degs.list.df, 'degs_low_vs_high_sivdna.txt')
+degs.list.df <- read_tsv('degs_low_vs_high_sivdna.txt')
+
+## Load gene sets
+ec_mono_pathways <- readxl::read_excel('data/raw/DEG_monocytes_EC vs non-HIC.xlsx') 
+
+ec_mono_geneset <- ec_mono_pathways |> 
+  unite('gs_name', c(comparison, regulation)) |> 
+  dplyr::select(gs_name, gene) |> 
+  dplyr::rename(gene_symbol = gene) |> 
+  arrange(gs_name, gene_symbol) |> 
+  unique()
+
+manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx') |> 
+  mutate(gs_name = sub('(_Schoggins_2011|_Abdel-Mohsen_2015)', '', gs_name))
+
+gene_set_h_manual <- msigdbr::msigdbr(category = 'H') %>%  
+  select(gs_name, gene_symbol) %>% 
+  bind_rows(manual_pathways %>% 
+              select(gs_name, gene_symbol))  |> 
+  bind_rows(ec_mono_geneset) |> 
+  unique()
+
+# ORA
+gene.list.up <- list()
+gene.list.down <- list()
+for(i in seq_along(degs.list)) {
+  
+  gene.list.up[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC > 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+  
+  gene.list.down[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC < 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+}
+names(gene.list.up) <- names(degs.list)
+names(gene.list.down) <- names(degs.list)
+
+gene.list.up <- compact(gene.list.up)
+gene.list.down <- compact(gene.list.down)
+
+ora.list.up <- compareCluster(gene.list.up, fun = 'enricher', 
+                              TERM2GENE = gene_set_h_manual, 
+                              universe = rownames(ln.obj))
+
+ora.list.down <- compareCluster(gene.list.down, fun = 'enricher', 
+                                TERM2GENE = gene_set_h_manual,
+                                universe = rownames(ln.obj))
+
+bind_ora <- bind_rows(list(up = ora.list.up@compareClusterResult,
+                    down = ora.list.down@compareClusterResult), .id = 'id') |> 
+  filter(Count >= 3, !(Cluster %in% c('Naive B cells', 'Memory B cells', 'GC B cells'))) |> 
+  mutate(ID = sub('HALLMARK_', '', ID))
+
+mat <- bind_ora %>% 
+  dplyr::mutate(Count = ifelse(id == 'down', -1, 1)) |> 
+  dplyr::select(Cluster, ID, Count) |>  
+  pivot_wider(names_from = Cluster, values_from = Count, values_fill = 0) |> 
+  column_to_rownames('ID') |> 
+  as.matrix()
+   
+clust.row  <- hclust(dist(mat)) 
+clust.column  <- hclust(dist(t(mat)))
+
+dotplot <- bind_ora |> 
+  dplyr::mutate(ID = factor(ID, levels = clust.row$labels ),
+                Cluster = factor(Cluster, levels = clust.column$labels )) |> 
+  ggplot(aes(x = Cluster, y = ID)) + 
+         geom_point(aes(size = Count, fill = id), shape = 21) +
+         theme_bw(base_size = 12) +
+         scale_fill_manual(values = c('blue', 'red'), name = 'Direction',
+                           labels = c('Downregulated', 'Upregulated')) +
+  labs(x = '', y = '')+
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 13))
+
+degs.df <- bind_rows(lapply(degs.list, 
+                            function(x) x |> 
+                              rownames_to_column('geneID')), .id = 'Cluster') |> 
+  dplyr::select(Cluster, geneID, p_val_adj, avg_log2FC)
+
+hypoxia.le <- bind_ora |> 
+  dplyr::filter( ID == 'HYPOXIA') |> 
+  separate_longer_delim(geneID, delim = '/') |> 
+  left_join(degs.df) |> 
+  select(Cluster, geneID, avg_log2FC) |> 
+  unique() |> 
+  pivot_wider(names_from = 'geneID', values_from = 'avg_log2FC') |> 
+  column_to_rownames('Cluster')
+  
+Heatmap(t(hypoxia.le), name = 'log2FoldChange', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(colors = c('white', 'blue'), breaks = c(0,-2.5)), 
+        column_names_rot = 45, width = unit(4.3, "cm"), height = unit(9, 'cm'),
+        rect_gp = gpar(col = "black", lwd = 0.2), 
+        row_names_gp = gpar(fontsize = 8))
+
+### Run CellChat
+library(CellChat)
+ 
+#### Whole dataset ATAC gene activity ----
+# creat cellchat object from seurat
+cellChat.obj <- createCellChat(ln.obj, 
+                               group.by = "manual.annotation.fine", 
+                               assay = "gene.activity")
+
+#Set the ligand-receptor interaction database
+CellChatDB.IFN <- subsetDB(CellChatDB.human, search = c('IFN-I', 'IFN-II', 'TGFb'), 
+                           key = 'pathway_name')
+
+cellChat.obj@DB <- CellChatDB.IFN
+
+cellChat.obj <- subsetData(cellChat.obj)
+future::plan("multisession", workers = 6)
+options(future.globals.maxSize = 700 * 1024^2)
+
+#Preprocessing the expression data
+cellChat.obj <- identifyOverExpressedGenes(cellChat.obj)
+cellChat.obj <- identifyOverExpressedInteractions(cellChat.obj)
+cellChat.obj<- projectData(cellChat.obj, PPI.human)
+
+## INFER CELL-CELL COMUNICATION NETWORK
+cellChat.obj <- computeCommunProb(cellChat.obj, population.size = T,  
+                                  type = "truncatedMean", trim = 0.01)
+
+# Filter out the cell-cell communication if there are only few number of cells in certain cell groups
+cellChat.obj <- filterCommunication(cellChat.obj, min.cells = 10)
+
+df.net.obj <- subsetCommunication(cellChat.obj)
+#write_tsv(df.net.obj, 'results/figures/new/cell_communication_LN_atac.gene.activity.tsv')
+
+# Infer the cell-cell communication at a signaling pathway level
+cellChat.obj <- computeCommunProbPathway(cellChat.obj)
+
+#Calculate the aggregated cell-cell communication network
+cellChat.obj <- aggregateNet(cellChat.obj)
+
+
+#### Visualization of cell-cell communication network
+# Chord diagram
+pathways.show <- c("IFN-II") 
+
+netVisual_aggregate(cellChat.obj, signaling = pathways.show, layout = "chord")
+netVisual_heatmap(cellChat.obj, signaling = pathways.show, color.heatmap = "Reds")
+
+#saveRDS(cellChat.obj, 'data/processed/new/cellChat.atac_gene.activity_LN.rds')
+cellChat.obj <- readRDS('data/processed/new/cellChat.atac_gene.activity_LN.rds')
+
+#### Whole dataset Gene expression ----
+# creat cellchat object from seurat
+cellChat.obj <- createCellChat(ln.obj, 
+                               group.by = "ident", 
+                               assay = "RNA")
+
+#Set the ligand-receptor interaction database
+CellChatDB.IFN <- subsetDB(CellChatDB.human, 
+                           search = c('IFN-I', 'IFN-II', 'TGFb'), 
+                           key = 'pathway_name')
+
+cellChat.obj@DB <- CellChatDB.IFN
+
+cellChat.obj <- subsetData(cellChat.obj)
+future::plan("multisession", workers = 6)
+options(future.globals.maxSize = 700 * 1024^2)
+
+#Preprocessing the expression data
+cellChat.obj <- identifyOverExpressedGenes(cellChat.obj)
+cellChat.obj <- identifyOverExpressedInteractions(cellChat.obj)
+cellChat.obj <- projectData(cellChat.obj, PPI.human)
+
+## INFER CELL-CELL COMUNICATION NETWORK
+cellChat.obj <- computeCommunProb(cellChat.obj, population.size = T,  
+                                  type = "truncatedMean", trim = 0.01)
+
+# Filter out the cell-cell communication if there are only 
+# few number of cells in certain cell groups
+cellChat.obj <- filterCommunication(cellChat.obj, min.cells = 10)
+
+df.net.obj <- subsetCommunication(cellChat.obj)
+#write_tsv(df.net.obj, 'results/figures/new/cell_communication_LN_atac.gene.activity.tsv')
+#df.net.obj <- read_tsv('results/figures/new/cell_communication_LN_atac.gene.activity.tsv')
+
+# Infer the cell-cell communication at a signaling pathway level
+cellChat.obj <- computeCommunProbPathway(cellChat.obj)
+
+#Calculate the aggregated cell-cell communication network
+cellChat.obj <- aggregateNet(cellChat.obj)
+
+
+#### Visualization of cell-cell communication network
+# Chord diagram
+#IFNg
+subsets.to.plot <-  c("CD8 T Naive", "CD8 T Eff/Mem",
+                      "Th1" , "CD4 T Intermediate",
+                      "Treg",  "CD4 T Naive", "Tfh",  
+                      "Th2/Th17", 
+                      "NK", "Cycling CD4/CD8", "DCs", "Macrophages",  "pDCs")
+
+group.order <- c("CD8 T Naive" = 'CD8', "CD8 T Eff/Mem"  = 'CD8',
+                 "Th1"  = 'CD4' , "CD4 T Intermediate" = 'CD4',
+                 "Treg" = 'CD4',  "CD4 T Naive" = 'CD4', 
+                 "Tfh" = 'CD4',  "Th2/Th17" = 'CD4',  'NK' = 'NK',
+                  "Cycling CD4/CD8" = "Cycling CD4/CD8", 
+                  "DCs" = 'Myeloid',  "Macrophages" = 'Myeloid',  "pDCs" = 'Myeloid', 
+                  "Naive B cells" = 'B',  "Memory B cells" = 'B', 
+                  "FDCs" = 'FDCs', "Plasma cells" = 'B',  "GC B cells" = 'B')
+
+pathways.show <- c("IFN-II") 
+
+netVisual_heatmap(cellChat.obj, signaling = pathways.show, color.heatmap = "Reds")
+
+pdf(file ="results/figures/new/cellchat_IFNg.pdf", width = 8, height = 8)
+
+netVisual_aggregate(cellChat.obj, signaling = pathways.show, 
+                    layout = "chord",  top = 0.5,
+                    group = group.order, show.legend = T)
+
+dev.off()
+
+#TGFb
+pathways.show <- c("TGFb") 
+
+netVisual_heatmap(cellChat.obj, signaling = pathways.show, color.heatmap = "Reds")
+
+pdf(file ="cellchat_TGFb.pdf", width = 10, height = 8)
+
+netVisual_aggregate(cellChat.obj, signaling = pathways.show, layout = "chord",  top = 0.5)
+
+dev.off()
+
+#saveRDS(cellChat.obj, 'data/processed/new/cellChat.RNA_LN.rds')
+#cellChat.obj <- readRDS('data/processed/new/cellChat.RNA_LN.rds')
+
+#### Compare low vs high siv-dna
+## Low siv-dna
+ln.obj.lowsiv <- subset(ln.obj, subset = siv.dna.group == 'low') 
+
+# creat cellchat object from seurat
+cellChat.lowsiv <- createCellChat(ln.obj.lowsiv, 
+                               group.by = "ident", 
+                               assay = "RNA")
+
+#Set the ligand-receptor interaction database
+CellChatDB.IFN <- subsetDB(CellChatDB.human, 
+                           search = c('IFN-I', 'IFN-II', 'TGFb'), 
+                           key = 'pathway_name')
+
+cellChat.lowsiv@DB <- CellChatDB.IFN
+
+cellChat.lowsiv  <- subsetData(cellChat.lowsiv)
+future::plan("multisession", workers = 6)
+options(future.globals.maxSize = 700 * 1024^2)
+
+#Preprocessing the expression data
+cellChat.lowsiv  <- identifyOverExpressedGenes(cellChat.lowsiv)
+cellChat.lowsiv <- identifyOverExpressedInteractions(cellChat.lowsiv)
+cellChat.lowsiv <- projectData(cellChat.lowsiv, PPI.human)
+
+## INFER CELL-CELL COMUNICATION NETWORK
+cellChat.lowsiv <- computeCommunProb(cellChat.lowsiv, population.size = T,  
+                                  type = "truncatedMean", trim = 0.01)
+
+# Filter out the cell-cell communication if there are only 
+# few number of cells in certain cell groups
+cellChat.lowsiv <- filterCommunication(cellChat.lowsiv, min.cells = 10)
+
+df.net.lowsiv <- subsetCommunication(cellChat.lowsiv)
+#write_tsv(df.net.lowsiv, 'results/figures/new/cell_communication_LN_gex_lowsiv_dna.tsv')
+
+# Infer the cell-cell communication at a signaling pathway level
+cellChat.lowsiv <- computeCommunProbPathway(cellChat.lowsiv)
+
+#Calculate the aggregated cell-cell communication network
+cellChat.lowsiv <- aggregateNet(cellChat.lowsiv)
+#saveRDS(cellChat.lowsiv, 'data/processed/new/cellChat.RNA_LN_lowsivdna.rds')
+
+### High siv-dna
+ln.obj.highsiv <- subset(ln.obj, subset = siv.dna.group == 'high') 
+
+# creat cellchat object from seurat
+cellChat.highsiv <- createCellChat(ln.obj.highsiv, 
+                                   group.by = "ident", 
+                                   assay = "RNA")
+
+#Set the ligand-receptor interaction database
+CellChatDB.IFN <- subsetDB(CellChatDB.human, 
+                           search = c('IFN-I', 'IFN-II', 'TGFb'), 
+                           key = 'pathway_name')
+
+cellChat.highsiv@DB <- CellChatDB.IFN
+
+cellChat.highsiv  <- subsetData(cellChat.highsiv)
+future::plan("multisession", workers = 6)
+options(future.globals.maxSize = 700 * 1024^2)
+
+#Preprocessing the expression data
+cellChat.highsiv  <- identifyOverExpressedGenes(cellChat.highsiv)
+cellChat.highsiv <- identifyOverExpressedInteractions(cellChat.highsiv)
+cellChat.highsiv <- projectData(cellChat.highsiv, PPI.human)
+
+## INFER CELL-CELL COMUNICATION NETWORK
+cellChat.highsiv <- computeCommunProb(cellChat.highsiv, population.size = T,  
+                                      type = "truncatedMean", trim = 0.01)
+
+# Filter out the cell-cell communication if there are only 
+# few number of cells in certain cell groups
+cellChat.highsiv <- filterCommunication(cellChat.highsiv, min.cells = 10)
+
+df.net.highsiv <- subsetCommunication(cellChat.highsiv)
+#write_tsv(df.net.highsiv, 'results/figures/new/cell_communication_LN_gex_highsiv_dna.tsv')
+
+# Infer the cell-cell communication at a signaling pathway level
+cellChat.highsiv <- computeCommunProbPathway(cellChat.highsiv)
+
+#Calculate the aggregated cell-cell communication network
+cellChat.highsiv <- aggregateNet(cellChat.highsiv)
+#saveRDS(cellChat.highsiv, 'data/processed/new/cellChat.RNA_LN_highsivdna.rds')
+
+object.list <- list(low.siv = cellChat.lowsiv,
+                    high.siv = cellChat.highsiv)
+
+cellchat.merged <- mergeCellChat(object.list, add.names = names(object.list))
+
+gg1 <- compareInteractions(cellchat.merged, show.legend = F, group = c(1,2))
+gg2 <- compareInteractions(cellchat.merged, show.legend = F, group = c(1,2), measure = "weight")
+gg1 + gg2
+
+pathways.show <- c("IFN-II") 
+pathways.show <- c("TGFb")
+
+netVisual_bubble(cellchat.merged, signaling = pathways.show, sources.use = 1,
+                 comparison = c(1, 2), angle.x = 45)
+
+# Identify dysfunctional signaling by using differential expression analysis
+pos.dataset = "low.siv"
+features.name = paste0(pos.dataset, ".merged")
+
+cellchat.merged <- identifyOverExpressedGenes(cellchat.merged, 
+                                              group.dataset = "datasets", 
+                                              pos.dataset = pos.dataset, 
+                                              features.name = features.name, 
+                                              only.pos = FALSE, thresh.pc = 0.01, 
+                                              thresh.fc = 0.05, thresh.p = 0.05, 
+                                              group.DE.combined = FALSE)
+
+net <- netMappingDEG(cellchat.merged, features.name = features.name, variable.all = TRUE)
+
+net.up <- subsetCommunication(cellchat.merged, net = net, datasets = "low.siv",
+                              ligand.logFC = 0.05, receptor.logFC = NULL)
+
+net.down <- subsetCommunication(cellchat.merged, net = net, datasets = "high.siv",
+                                ligand.logFC = -0.05, receptor.logFC = NULL)
+
+gene.up <- extractGeneSubsetFromPair(net.up, cellchat.merged)
+gene.down <- extractGeneSubsetFromPair(net.down, cellchat.merged)
+
+
+netVisual_chord_gene(object.list[[2]],  
+                     slot.name = 'net', net = net.down, lab.cex = 0.8, 
+                     small.gap = 3.5, 
+                     title.name = paste0("Down-regulated signaling in ", 
+                                         names(object.list)[2]))
+
+pathways.show <- c("IFN-II") 
+pathways.show <- c("TGFb") 
+par(mfrow = c(1,2), xpd=TRUE)
+ht <- list()
+for (i in 1:length(object.list)) {
+  ht[[i]] <- netVisual_heatmap(object.list[[i]], signaling = pathways.show, 
+                               color.heatmap = "Reds", 
+                               title.name = paste(pathways.show, 
+                                                  "signaling ",names(object.list)[i]))
+}
+for (i in 1:length(object.list)) {
+  netVisual_aggregate(object.list[[i]], 
+                      signaling = pathways.show, layout = "chord", 
+                      signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+
+
+
+
+
+
+
+
+
+```
+
+```{r DEGs all subsets fine annotation}
+ln.obj <- read_rds('data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar_v2.rds')
+
+DefaultAssay(ln.obj) <- 'gene.activity'
+Idents(ln.obj) <- ln.obj$manual.annotation.fine
+idents <- levels(Idents(ln.obj))
+degs.list <- list()
+for(i in 1:length(idents)) {
+    degs.list[[i]] <- FindMarkers(ln.obj, 
+                                  ident.1 = "low", 
+                                  ident.2 = "high",
+                                  group.by = 'siv.dna.group', 
+                                  subset.ident = idents[i])
+}
+names(degs.list) <- idents
+
+degs.df <- bind_rows(degs.list, .id = 'cluster') |> 
+  rownames_to_column('genesymbol') |> 
+  mutate(genesymbol = sub('\\..*', '', genesymbol)) |> 
+  filter(p_val_adj < 0.1)
+
+ec_mono_pathways <- readxl::read_excel('data/raw/DEG_monocytes_EC vs non-HIC.xlsx') 
+
+ec_mono_geneset <- ec_mono_pathways |> 
+  unite('gs_name', c(comparison, regulation)) |> 
+  dplyr::select(gs_name, gene) |> 
+  dplyr::rename(gene_symbol = gene) |> 
+  arrange(gs_name, gene_symbol) |> 
+  unique()
+
+manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx') |> 
+  mutate(gs_name = sub('(_Schoggins_2011|_Abdel-Mohsen_2015)', '', gs_name))
+
+gene_set_c2 <-msigdbr::msigdbr(category = 'C2')  |> 
+  filter(grepl('CP:', gs_subcat)) |> 
+  select(gs_name, gene_symbol) %>%
+  unique()
+
+gene_set_h_manual <- msigdbr::msigdbr(category = 'H') %>%  
+  select(gs_name, gene_symbol) %>% 
+  bind_rows(manual_pathways %>% 
+              select(gs_name, gene_symbol))  |> 
+  bind_rows(ec_mono_geneset) |> 
+  unique()
+
+# ORA
+gene.list.up <- list()
+gene.list.down <- list()
+for(i in seq_along(degs.list)) {
+  
+  gene.list.up[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC > 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+  
+  gene.list.down[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC < 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+}
+names(gene.list.up) <- names(degs.list)
+names(gene.list.down) <- names(degs.list)
+
+gene.list.up <- compact(gene.list.up)
+gene.list.down <- compact(gene.list.down)
+
+ora.list.up <- compareCluster(gene.list.up, fun = 'enricher', 
+                              TERM2GENE = gene_set_h_manual, 
+                              universe = rownames(ln.obj))
+
+#write_tsv(ora.list.up@compareClusterResult, 
+#          'results/figures/new/ORA_Tcells_Low_vs_High_SIVDNA_up.tsv')
+
+ora.list.down <- compareCluster(gene.list.down, fun = 'enricher', 
+                                TERM2GENE = gene_set_h_manual,
+                                universe = rownames(ln.obj))
+
+#write_tsv(ora.list.down@compareClusterResult, 
+#          'results/figures/new/ORA_Tcells_Low_vs_High_SIVDNA_down.tsv')
+
+
+bind_ora <- bind_rows(list(up = ora.list.up@compareClusterResult,
+                    down = ora.list.down@compareClusterResult), .id = 'id') |> 
+  filter(Count >= 3) |> 
+  mutate(ID = sub('HALLMARK_', '', ID))
+
+#write_tsv(bind_ora, 'results/ORA_hallmark_epigenetics.tsv')
+
+mat <- bind_ora %>% 
+  dplyr::mutate(Count = ifelse(id == 'down', -1, 1)) |> 
+  dplyr::select(Cluster, ID, Count) |>  
+  pivot_wider(names_from = Cluster, values_from = Count, values_fill = 0) |> 
+  column_to_rownames('ID') |> 
+  as.matrix()
+   
+clust.row  <- hclust(dist(mat)) 
+clust.column  <- hclust(dist(t(mat)))
+
+dotplot <- bind_ora |> 
+  dplyr::mutate(ID = factor(ID, levels = clust.row$labels ),
+                Cluster = factor(Cluster, levels = clust.column$labels )) |> 
+  ggplot(aes(x = Cluster, y = ID)) + 
+         geom_point(aes(size = Count, fill = id), shape = 21) +
+         theme_bw(base_size = 12) +
+         scale_fill_manual(values = c('blue', 'red'), name = 'Direction',
+                           labels = c('Downregulated', 'Upregulated')) +
+  labs(x = '', y = '')+
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 13))
+
+```
+
+
+```{r pyscenic}
+ln.obj <- readRDS('data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar.rds')
+
+ln.data <- GetAssayData(ln.obj, layer = "data") %>% 
+  as.data.frame()
+
+#write.table(ln.data, 'data/processed/new/ln.obj_expr_mat_v2.tsv', 
+#            sep = '\t',  col.names=NA)
+
+auc_mtx <- read_csv('results/pyscenic/auc_mtx.csv') %>% 
+  column_to_rownames('Cell')
+
+ln.obj[["scenic"]] <- CreateAssayObject(data =  t(auc_mtx))
+
+DefaultAssay(ln.obj) <- 'scenic'
+
+FeaturePlot(ln.obj, features = 'STAT1(+)', reduction = 'wnn.umap', 
+            min.cutoff = 'q1', max.cutoff = 'q95', split.by = 'siv.dna.group')
+
+DotPlot(ln.obj, features = 'FOS(+)',  split.by = 'siv.dna.group')
+
+rss <- calcRSS(AUC= ln.obj@assays$scenic@data, 
+               cellAnnotation = ln.obj$manual.annotation.fine)
+
+rssPlot <- plotRSS(rss)
+plotly::ggplotly(rssPlot$plot)
+
+plotRSS_oneSet(rss, setName = "CD8 T Eff/Mem")
+plotRSS_oneSet(rss, setName = "Th1")
+plotRSS_oneSet(rss, setName = "Macrophages")
+
+avg.aucell <- AverageExpression(ln.obj, group.by = 'manual.annotation.fine',
+                  assays = 'scenic', layer = 'data')$scenic
+
+scaled.expr = t(scale(t(as.matrix(log1p(ifn.avg.expr)))))
+
+scaled.expr <- t(scale(t(as.matrix(avg.aucell))))
+
+library(ComplexHeatmap)
+library(circlize)
+col_fun = colorRamp2(c(-4, -2, 0, 2, 4), c('darkblue', 'blue', 'white', 'red', 'darkred'))
+
+Heatmap(scaled.expr, name = "z-score\nAvg. Expr.",
+        column_names_gp = gpar(fontsize = 8),
+        row_names_gp = gpar(fontsize = 3), 
+        col = col_fun,
+        column_names_rot = 45,
+        heatmap_width = unit(9, "cm"), heatmap_height =  unit(25, "cm"), 
+        clustering_method_rows = "ward.D2",
+        clustering_method_columns = "ward.D2", 
+        #column_split =  2, 
+        #row_split = 2, 
+        border = TRUE)
+
+### Targets network
+regulons <- read_csv('results/pyscenic/regulons.csv', skip = 1) |> 
+  slice(-1) |> 
+  rename(TF = `...1`, MotifID = `...2`)
+
+regulons.tidy <- regulons |> 
+  select(TF, TargetGenes) |> 
+  separate_longer_delim(TargetGenes, delim = '),') |> 
+  separate(TargetGenes, c('TargetGene', 'score'), sep = ',') |> 
+  mutate(TargetGene = gsub("\\'", '', sub('.*\\(', '', TargetGene))) |> 
+  mutate(score = as.numeric(sub('\\).*', '', score)))
+  
+regulons.tidy.unique <- regulons.tidy |> 
+  select(TF, TargetGene) |> 
+  unique() 
+
+write_tsv(regulons.tidy.unique, 'results/pyscenic/regulons.tidy.unique.tsv')
+
+manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx')
+
+antiviral.isg.genes <- manual_pathways |> filter(gs_name =='ANTIVIRAL_ISGS')
+
+selected.regulon <- regulons.tidy.unique |> 
+  filter(TF %in% c('STAT1', 'TCF7', 'IRF3', 'IRF7', 'TBX21', 'GATA3')) |> 
+  mutate(weight = 1,
+         antiviral.isg = ifelse(TargetGene %in% antiviral.isg.genes$gene_symbol, 1, 0))
+
+
+#### Subset antiviral and tnf degs
+antiviral.degs <- unique(c(names(tcell.antiviral.le), names(myeloid.antiviral.le)))
+tnf.degs <- unique(c(names(tcell.tnf.le), names(myeloid.tnf.le)))
+
+antiviral.regulators <- regulons.tidy.unique |> 
+  filter(TargetGene %in% antiviral.degs) |> 
+  select(TF) |> 
+  unique() |>
+  deframe()
+
+antiviral.regulons <- regulons.tidy.unique |> 
+  filter(TF %in% antiviral.regulators) 
+
+nodes.df <- enframe(table(antiviral.regulons$TF)) |> 
+  mutate(value = as.double(value), class = 'TF') |> 
+  bind_rows(tibble(name = unique(antiviral.regulons$TargetGene), value = 1,
+                   class = 'target.gene')) |> 
+  mutate(antiviral.degs = ifelse(name %in% antiviral.degs, 1, 0)) |> 
+  dplyr::rename(id = name, size = value) |> 
+  group_by(id) |> 
+  slice_max(order_by = size, n = 1) |> 
+  ungroup()
+
+edges.df <- antiviral.regulons %>% 
+  mutate(weigth = 1) %>% 
+  rename(source = TF, target = TargetGene) 
+
+library(RCy3)
+createNetworkFromDataFrames( nodes = nodes.df, edges = edges.df, 
+                            title = "Antiviral regulons",
+                            collection = "Network collection")
+  
+
+
+```
+
+```{r Diff express test}
+ln.obj <- readRDS('data/processed/new/ln.integrated.annot.geneactivity.chromvar.rds')
+
+## Add manual fine annotation
+manual.annotation <- read_tsv('data/processed/new/manual_annotation_fine.tsv')
+
+ln.obj$manual.annotation.fine <- manual.annotation$manual.annotation.fine
+Idents(ln.obj) <- ln.obj$manual.annotation.fine
+
+DimPlot(ln.obj, label = T, repel = T, reduction = 'wnn.umap', label.box = T) + 
+  NoLegend()
+
+#### Cell frequencies
+cell.freq <- ln.obj@meta.data %>% 
+  group_by(animal, siv.dna.group) %>% 
+  count(manual.annotation.fine) %>% 
+  group_by(animal) %>% 
+  mutate(freq = n/sum(n)) 
+
+cell.freq.stat <- cell.freq %>% 
+  group_by(manual.annotation.fine) %>% 
+  wilcox_test(freq ~ siv.dna.group) %>% 
+  adjust_pvalue(p.col = 'p', method = 'BH')
+
+cell.freq %>% 
+  ggplot(aes(x = siv.dna.group, y = freq*100)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point() +
+  facet_wrap(~manual.annotation.fine, scales = 'free_y')
+
+
+
+# Test expression low vs high animals
+#### GEX Low vs High SIV-DNA
+DefaultAssay(ln.obj) <- 'RNA'
+Idents(ln.obj) <- ln.obj$manual.annotation.fine
+idents <- levels(Idents(ln.obj))
+degs.list <- list()
+for(i in 1:length(idents)) {
+    degs.list[[i]] <- FindMarkers(ln.obj, 
+                                  ident.1 = "low", 
+                                  ident.2 = "high",
+                                  group.by = 'siv.dna.group', 
+                                  subset.ident = idents[i])
+}
+names(degs.list) <- idents
+
+ec_mono_pathways <- readxl::read_excel('data/raw/DEG_monocytes_EC vs non-HIC.xlsx') 
+
+ec_mono_geneset <- ec_mono_pathways |> 
+  unite('gs_name', c(comparison, regulation)) |> 
+  dplyr::select(gs_name, gene) |> 
+  rename(gene_symbol = gene) |> 
+  arrange(gs_name, gene_symbol) |> 
+  unique()
+
+manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx')
+
+gene_set_h_manual <- msigdbr::msigdbr(category = 'H') %>%  
+  select(gs_name, gene_symbol) %>% 
+  bind_rows(manual_pathways %>% 
+              select(gs_name, gene_symbol))  |> 
+  bind_rows(ec_mono_geneset) |> 
+  unique()
+
+# ORA
+gene.list.up <- list()
+gene.list.down <- list()
+for(i in seq_along(degs.list)) {
+  
+  gene.list.up[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC > 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+  
+  gene.list.down[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC < 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+}
+names(gene.list.up) <- names(degs.list)
+names(gene.list.down) <- names(degs.list)
+
+gene.list.up <- compact(gene.list.up)
+gene.list.down <- compact(gene.list.down)
+
+ora.list.up <- compareCluster(gene.list.up, fun = 'enricher', 
+                              TERM2GENE = gene_set_h_manual, 
+                              universe = rownames(ln.obj))
+
+#write_tsv(ora.list.up@compareClusterResult, 
+#          'results/figures/new/ORA_Tcells_Low_vs_High_SIVDNA_up.tsv')
+
+ora.list.down <- compareCluster(gene.list.down, fun = 'enricher', 
+                                TERM2GENE = gene_set_h_manual,
+                                universe = rownames(ln.obj))
+
+#write_tsv(ora.list.down@compareClusterResult, 
+#          'results/figures/new/ORA_Tcells_Low_vs_High_SIVDNA_down.tsv')
+
+
+smad.targets <- gene_set_c3 |> 
+  filter(gs_name %in% c('SMAD_Q6','SMAD3_Q6', 'SMAD4_Q6')) |> 
+  select(gene_symbol) |> deframe()
+
+up.reg.genes <- ora.list.up@compareClusterResult |> 
+  select(geneID) |> 
+  separate_longer_delim(geneID, delim= '/') |> 
+  deframe()
+
+top.up.reg.genes <- names(sort(table(up.reg.genes), decreasing = T)[1:5])
+
+down.reg.genes <- ora.list.down@compareClusterResult |> 
+  select(geneID) |> 
+  separate_longer_delim(geneID, delim= '/') |> 
+  deframe()
+
+unique(down.reg.genes[which(down.reg.genes %in% smad.targets)])
+
+top.down.reg.genes <- names(sort(table(down.reg.genes), decreasing = T)[1:5])
+
+VlnPlot(ln.obj, features = top.up.reg.genes[1:2], split.by = 'siv.dna.group', ncol = 1, pt.size = 0)
+
+VlnPlot(ln.obj, features = top.down.reg.genes[1:2], split.by = 'siv.dna.group', ncol = 1, pt.size = 0)
+
+VlnPlot(ln.obj, features = c('TGFB1', 'SMAD2'), split.by = 'siv.dna.group', ncol = 1, pt.size = 0)
+
+
+DotPlot(ln.obj, features = top.down.reg.genes[1:2], split.by = 'siv.dna.group', scale = F)
+
+library(dittoSeq)
+dittoDotPlot(ln.obj, vars = c(top.down.reg.genes[1:5], 
+                              top.up.reg.genes[1:5]), 
+             group.by = "manual.annotation", 
+             split.by = 'siv.dna.group') +
+  scale_color_viridis_c(option = 'H')
+
+ln.obj$animal.fine.annot <- paste(ln.obj$siv.dna.group, ln.obj$manual.annotation, sep = '_')
+Idents(ln.obj) <- ln.obj$animal.fine.annot
+
+aggr.expr <- AggregateExpression(ln.obj, assays = 'RNA')
+
+rna.vst <- DESeq2::vst(as.matrix(aggr.expr$RNA))
+
+tgfb <- c('TGFB1', 'TGFBR1', 'SMAD2', 'SMAD3', 'SMARCA4', 'GSK3B')
+
+rna.vst.selct <- rna.vst[c(top.up.reg.genes, 
+                           top.down.reg.genes,
+                           tgfb),]
+
+rna.scaled <- t(scale(t(rna.vst.selct)))
+
+rna.scaled.sorted <- rna.scaled |> 
+  as.data.frame() |> 
+  rownames_to_column('gene') |> 
+  pivot_longer(-gene) |> 
+  separate_wider_delim(name, names = c('group', 'celltype'), delim = '-') |> 
+  arrange(group, celltype) |> 
+  unite('name', group:celltype) |> 
+  pivot_wider(names_from = 'name', values_from = value) |> 
+  column_to_rownames('gene')
+
+column_ha = HeatmapAnnotation(group = sub('_.*', '', colnames(rna.scaled.sorted)),
+                              col = list(group = c('low' = 'blue' , 'high' = 'red')))
+
+Heatmap(rna.scaled.sorted, name = 'z-score', 
+        cluster_rows = F, 
+        cluster_columns = F,
+        show_row_names = T, 
+        column_names_rot = 60,
+        top_annotation = column_ha,
+        row_split = c(rep('ISGs', 5), rep('FOS/JUN', 5), rep('TGFb', 6)),
+        column_split = sub('_.*', '', colnames(rna.scaled.sorted)),
+        width = unit(11, 'cm'),
+        height = unit(8.8, 'cm'),
+        border = T,
+        column_labels = sub('.*_', '', colnames(rna.scaled.sorted)))
+
+
+#### Gene activity Low vs High SIV-DNA
+DefaultAssay(ln.obj) <- 'gene.activity'
+Idents(ln.obj) <- ln.obj$manual.annotation.fine
+idents <- levels(Idents(ln.obj))
+degs.list <- list()
+for(i in 1:length(idents)) {
+    degs.list[[i]] <- FindMarkers(ln.obj, 
+                                  ident.1 = "low", 
+                                  ident.2 = "high",
+                                  group.by = 'siv.dna.group', 
+                                  subset.ident = idents[i])
+}
+names(degs.list) <- idents
+
+ec_mono_pathways <- readxl::read_excel('data/raw/DEG_monocytes_EC vs non-HIC.xlsx') 
+
+ec_mono_geneset <- ec_mono_pathways |> 
+  unite('gs_name', c(comparison, regulation)) |> 
+  dplyr::select(gs_name, gene) |> 
+  rename(gene_symbol = gene) |> 
+  arrange(gs_name, gene_symbol) |> 
+  unique()
+
+manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx')
+
+gene_set_h_manual <- msigdbr::msigdbr(category = 'H') %>%  
+  select(gs_name, gene_symbol) %>% 
+  bind_rows(manual_pathways %>% 
+              select(gs_name, gene_symbol))  |> 
+  bind_rows(ec_mono_geneset) |> 
+  unique()
+
+# ORA
+gene.list.up <- list()
+gene.list.down <- list()
+for(i in seq_along(degs.list)) {
+  
+  gene.list.up[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC > 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+  
+  gene.list.down[[i]] <- degs.list[[i]] %>% 
+    rownames_to_column('genesymbol') %>% 
+    filter(p_val_adj < 0.1, avg_log2FC < 0) %>% 
+    select(genesymbol) %>% 
+    deframe
+}
+names(gene.list.up) <- names(degs.list)
+names(gene.list.down) <- names(degs.list)
+
+gene.list.up <- compact(gene.list.up)
+gene.list.down <- compact(gene.list.down)
+
+ora.list.up <- compareCluster(gene.list.up, fun = 'enricher', 
+                              TERM2GENE = gene_set_h_manual, 
+                              universe = rownames(ln.obj))
+
+ora.list.down <- compareCluster(gene.list.down, fun = 'enricher', 
+                                TERM2GENE = gene_set_h_manual,
+                                universe = rownames(ln.obj))
+
+```
+

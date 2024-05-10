@@ -1,0 +1,74 @@
+---
+title: "Dual blockade IL-10 / PD1 SIV - Data cleaning"
+author: "ten-Caten, Felipe - ftencat@emory.edu"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r Load libraries}
+library(tidyverse)
+library(readxl)
+```
+
+```{r Raw value - 103 features for linear regression}
+x <- read_tsv('data/raw/spearman_correlation_SIVRNA_wk36_ALL_modulated_features_wk12_wk21_wk36.tsv')
+
+features <- x %>% 
+  select(var2) %>% 
+  mutate(var2 = gsub('_singlets_lymphs_live' ,'', var2)) %>% 
+  mutate(var2 = gsub('Q[1-4]', '', var2)) %>% 
+  mutate(var2 = gsub('_Exhausted_Terminal', '', var2)) %>%
+  mutate(var2 = gsub('Exhausted_Terminal', '', var2)) %>% 
+  mutate(var2 = gsub('_StemLike', '', var2)) %>%
+  mutate(var2 = gsub('_Exhausted_Intermed', '', var2)) %>% 
+  mutate(var2 = gsub('_Cytolytic_Transitory', '', var2))  %>% 
+  mutate(var2 = sub('wk[0-9][0-9]_', "", var2)) %>% 
+  unique() %>% 
+  deframe()
+  
+  
+spr <- read_tsv('data/raw/20221204_Khader_Feature_Selection_values_SPR.txt') 
+#  pivot_longer(-c(animal, group, `wk36_LOG_SIVRNA_LN_per10^6correctedCD4Live`),
+#               values_drop_na = T, names_to = 'features')
+
+data <- read_excel('data/raw/Master_noPD1_UMAP_Manual_CLEAN.xlsx') %>% 
+  mutate(across(everything(), ~ifelse(. == "NA", NA, .))) %>% 
+  mutate(across(-c(ID_Merge, group, animal, `A*01Status`), as.double)) 
+
+exhaustion.data <- readxl::read_excel('data/raw/Merge_Hakeem_IRF4_TOX_code.xlsx', 
+                         na = c('NA', 'n_a'))
+
+first.gate  <- data %>% 
+  pivot_longer(-c('order':'WkPost-ATI')) %>% 
+  select(animal, group, `A*01Status`, year, `WkPost-TX`, `WkPost-ATI`, name, value) %>% 
+  filter(!is.na(value)) %>% 
+  relocate(animal, group, `A*01Status`, year, `WkPost-TX`, `WkPost-ATI`, name) %>% 
+  filter(!grepl('LN_CD3p_CD8p_Naive$', name)) 
+
+exhaustion <- exhaustion.data %>% 
+  select(-c(`LOG_SIV_DNA_LN_per10^6correctedCD4Live`,
+            `LOG_SIVRNA_LN_per10^6correctedCD4Live`, log_VL)) %>% 
+  pivot_longer(-c('order':'WkPost-ATI')) %>% 
+  select(animal, group, `A*01Status`, year, `WkPost-TX`, `WkPost-ATI`, name, value) %>% 
+  filter(!is.na(value)) %>% 
+  relocate(animal, group, `A*01Status`, year, `WkPost-TX`, `WkPost-ATI`, name) %>% 
+  filter(!grepl('LN_singlets_lymphs_live_CD3p_CD4p_TEM$', name)) 
+  
+df <- first.gate %>% 
+  bind_rows(exhaustion) %>% 
+  mutate(group = factor(group, levels = c('Control', 'aIL10',
+                                          'aIL10+aPD1'))) %>% 
+  mutate(name = gsub('_singlets_lymphs_live' ,'', name)) %>% 
+  mutate(name = gsub('Q[1-4]', '', name)) %>% 
+  mutate(name = gsub('_Exhausted_Terminal', '', name)) %>%
+  mutate(name = gsub('Exhausted_Terminal', '', name)) %>% 
+  mutate(name = gsub('_StemLike', '',name)) %>%
+  mutate(name = gsub('_Exhausted_Intermed', '', name)) %>% 
+  mutate(name = gsub('_Cytolytic_Transitory', '', name))  %>% 
+#  mutate(name = sub('wk[0-9][0-9]_', "", name)) %>% 
+#  filter(name %in% c(unique(sub('wk[0-9][0-9]_', "", spr$features)), 'IL10',
+#                     'MSD_Cluster_1', 'MSD_Cluster_2', 'MSD_Cluster_3')) %>% 
+  rename(parameter = name)
+
+write_tsv(df, 'data/processed/raw_data_all_timepoints_flowcytometry_cytokines_nofilter.tsv')
+```

@@ -1,0 +1,264 @@
+---
+title: "Multiome monkeys"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r Load libraries}
+library(tidyverse)
+library(ggpubr)
+library(ggprism)
+library(ggrepel)
+```
+
+```{r Load files}
+df <- readxl::read_xlsx('data/raw/Master_noPD1_UMAP_Manual_CLEAN.xlsx')
+
+vl.raw <- readxl::read_xlsx('data/raw/VL.xlsx')
+
+ipda <- readxl::read_excel('data/raw/IPDA_to_Ruy.xlsx')
+
+samples <- readxl::read_excel('data/raw/Samples for Susan.xlsx') |> 
+  filter(!is.na(`Sample ID`))
+```
+
+```{r Pre-processing}
+vl <- vl.raw %>% 
+  pivot_longer(-`...1`, names_to = 'week', values_to = 'VL') %>% 
+  rename(animal_group = `...1`) %>% 
+  filter(!grepl('median', animal_group)) %>% 
+  mutate(week = as.double(week)) %>% 
+  separate(animal_group, c('group', 'animal'), sep = '_') %>% 
+  mutate()
+  na.omit()
+```
+
+```{r Plots}
+multiome_animals <- c('RFl17', 'RYm17', 'RNy16', 
+                      'RRh17', 'Rbf17', 'Rbv17', 'RWs17')
+
+## AUC
+multiome.auc
+vl %>% 
+  filter(week >= 12) %>% 
+  group_by(animal) %>%
+  summarize(AUC = DescTools::AUC(week, VL, method = 'spline')) %>% 
+  arrange(AUC) %>% 
+  left_join(vl %>% select(group, animal) %>% unique) %>% 
+  ggplot(aes(x = group, y = AUC))+
+  geom_boxplot(outlier.shape = NA) +
+  scale_y_continuous(trans = 'log10') +
+  geom_jitter(position = position_jitter(seed = 1, width = 0.1))+ 
+  geom_label_repel(aes(label = animal), min.segment.length = 0,
+                   position = position_jitter(seed = 1, width = 0.1))
+
+multiome.auc <- vl %>% 
+  filter(week >= 12, animal %in% multiome_animals) %>% 
+  group_by(animal) %>%
+  summarize(AUC = DescTools::AUC(week, log10(VL), method = 'spline')) %>% 
+  arrange(AUC)
+
+multiome.vl <- vl %>% 
+  filter(week > 0, animal %in% multiome_animals) %>% 
+  mutate(animal = factor(animal, levels = multiome.auc$animal)) %>% 
+  ggplot(aes(x = week, y = VL, colour = animal)) +
+  geom_point(shape = NA) +
+  geom_line(size = 1, alpha = 0.9)+
+  geom_segment(aes(x = 12 , y = 0, xend = 12, yend = 1e6), linetype = 2,
+               colour = "black") +
+  annotate("label", label = "ATI", 
+           x = 12, y = 1e6, size = 3, colour = "black")+
+  scale_y_continuous(trans = 'log10', 
+                     breaks = c(10, 1e2, 1e3, 1e4, 1e5, 1e6)) +
+  scale_color_manual(values = c(RColorBrewer::brewer.pal(7, 'Set2'))) +
+  scale_x_continuous(breaks= c(0, 12, 36)) +
+  ylab('VL (cps/mL plasma)') +
+  xlab('Weeks Post-TX') +
+  theme_classic()
+
+#ggsave('results/multiome/viral_load_multiome_animals.pdf', multiome.vl,
+#       device = 'pdf', scale = 0.5)
+
+multiome.vl.per.animal <- vl %>% 
+  filter(week > 0, animal %in% multiome_animals) %>% 
+  mutate(animal = factor(animal, levels = multiome.auc$animal)) %>% 
+  ggplot(aes(x = week, y = VL, colour = animal)) +
+  geom_point(shape = NA) +
+  geom_line(size = 1) +
+  geom_segment(aes(x = 12 , y = 0, xend = 12, yend = 1e6), linetype = 2,
+               colour = "black") +
+  annotate("label", label = "ATI", 
+           x = 12, y = 5e5, size = 3, colour = "black")+
+  scale_y_continuous(trans = 'log10', 
+                     breaks = c(10, 1e2, 1e3, 1e4, 1e5, 1e6)) +
+  scale_color_manual(values = c(RColorBrewer::brewer.pal(7, 'Set2'))) +
+  scale_x_continuous(breaks= c(0, 12, 36)) +
+  facet_wrap(~animal)+
+  ylab('VL (cps/mL plasma)') +
+  xlab('Weeks Post-TX') +
+  theme_classic() +
+  theme(legend.position = 'none')
+
+#ggsave('results/multiome/viral_load_multiome_per_animal.pdf', multiome.vl.per.animal,
+#       device = 'pdf', scale = 0.7)
+
+multiome_animals <- c('RFl17', 'RYm17', 'RNy16', 
+                      'RRh17', 'RBf17', 'RBv17', 'RWs17')
+
+siv.dna.rna.plot <- df %>% 
+  filter(animal %in% multiome_animals, `WkPost-TX` == 36) %>% 
+  arrange(`LOG_SIVRNA_LN_per10^6correctedCD4Live`) %>% 
+  select(animal, `LOG_SIVRNA_LN_per10^6correctedCD4Live`, 
+         `LOG_SIV/DNA_LN_per10^6correctedCD4Live`) %>% 
+  pivot_longer(-animal) %>% 
+  mutate(animal_color = case_when(animal == 'RFl17' ~ "#66C2A5",
+                                  animal == 'RRh17' ~ "#FC8D62",
+                                  animal == 'RNy16' ~ "#8DA0CB",
+                                  animal == 'RYm17' ~ "#E78AC3",
+                                  animal == 'RBf17' ~ "#A6D854",
+                                  animal == 'RWs17' ~ "#FFD92F",
+                                  animal == 'RBv17' ~ "#E5C494")) %>% 
+  ggplot(aes(x = factor(animal, levels = unique(animal)), 
+             y = value)) +
+  geom_col(aes(fill = animal_color), color = 'black') +
+  scale_fill_identity() +
+  facet_wrap(~name) +
+  xlab('') +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+#ggsave('results/multiome/siv_dna_rna_per_animal.pdf', siv.dna.rna.plot,
+#       device = 'pdf', scale = 0.6)
+
+df %>% 
+  filter(animal %in% c(multiome_animals, 'RKq17'), `WkPost-TX` == 36) %>% 
+  rstatix::cor_test(vars = 'LOG_SIVRNA_LN_per10^6correctedCD4Live',
+                    vars2 = 'LOG_SIV/DNA_LN_per10^6correctedCD4Live',
+                    method = 'spearman')
+
+
+## Correlation SIVDNA vs SIVRNA
+multiome_animals <- c('RFl17', 'RYm17', 'RNy16', 
+                      'RRh17', 'RBf17', 'RBv17', 'RWs17')
+
+sivrna.sivdna.selected.animals <- ipda %>% 
+  filter(`WkPost-ATI` == 24) %>% 
+  ggplot(aes(x = `LOG_SIVRNA_LN_per10^6correctedCD4Live`, 
+             y = `LOG_SIV/DNA_LN_per10^6correctedCD4Live`)) +
+    geom_point(aes(colour = group), size = 3) +
+    geom_smooth(method = 'lm', se = F) +
+  geom_label_repel(data = ipda %>% 
+                     filter(`WkPost-ATI` == 24, animal %in% multiome_animals),
+                   aes(label = animal), min.segment.length = 0)+
+    stat_cor(aes(label = paste(paste("'rho'", ..r.., sep = "~`=`~"), 
+                               ..p.label.., sep = "~`,`~")),
+             method = 'spearman', size = 5, cor.coef.name = 'rho',
+             label.y = 4.5) +
+    scale_color_manual(values = c('red','blue', 'black'), name = 'Group') +
+    labs(x = 'Log CA-vRNA - LN\nWeek 24 post-ATI',
+         y = 'Log CA-vDNA - LN\nWeek 24 post-ATI')+
+    theme_prism() +
+  theme(legend.title = element_text())
+
+sivrna.sivdna.selected.animals
+
+#ggsave('results/figures/correlation_sivdna_sivrna_selected_animals_multiome.pdf',
+#       sivrna.sivdna.selected.animals, device = 'pdf', scale = 0.7)
+
+sivdna.2ltr.selected.animals  
+ipda %>% 
+  filter(`WkPost-ATI` == 24) %>% 
+  ggplot(aes(y = log10(`2LTR Circles_Count Per Million CD4 live cells_LN`), 
+             x = `LOG_SIV/DNA_LN_per10^6correctedCD4Live`)) +
+    geom_point(aes(colour = group), size = 3) +
+    geom_smooth(method = 'lm', se = F) +
+  geom_label_repel(data = ipda %>% 
+                     filter(`WkPost-ATI` == 24, animal %in% multiome_animals),
+                   aes(label = animal), min.segment.length = 0)+
+    stat_cor(aes(label = paste(paste("'rho'", ..r.., sep = "~`=`~"), 
+                               ..p.label.., sep = "~`,`~")),
+             method = 'spearman', size = 5, cor.coef.name = 'rho') +
+    scale_color_manual(values = c('red','blue', 'black'), name = 'Group') +
+    labs(y = 'Log 2LTR − LN\nWeek 24 post−ATI',
+         x = 'Log CA-vDNA - LN\nWeek 24 post-ATI')+
+    theme_prism() +
+  theme(legend.title = element_text())
+
+sivrna.sivdna.selected.animals
+
+ggsave('results/figures/correlation_sivdna_2LTR_selected_animals_multiome.pdf',
+       sivdna.2ltr.selected.animals, device = 'pdf', scale = 0.7)
+
+#AUC All animals and groups
+
+auc.all.animals <- vl %>% 
+  filter(week >= 12) %>% 
+  group_by(animal) %>%
+  summarize(AUC = DescTools::AUC(week, log10(VL), method = 'spline')) %>% 
+  arrange(AUC)
+
+vl.per.animal.ail10 <- vl %>% 
+  filter(week > 0, group == 'aIL-10') %>% 
+  mutate(animal = factor(animal, levels = auc.all.animals$animal)) %>% 
+  ggplot(aes(x = week, y = VL, colour = animal)) +
+  geom_point(shape = NA) +
+  geom_line(size = 1, color = 'red') +
+  geom_segment(aes(x = 12 , y = 0, xend = 12, yend = 1e6), linetype = 2,
+               colour = "black") +
+  annotate("label", label = "ATI", 
+           x = 12, y = 5e6, size = 3, colour = "black")+
+  scale_y_continuous(trans = 'log10', 
+                     breaks = c(10, 1e2, 1e3, 1e4, 1e5, 1e6)) +
+  scale_x_continuous(breaks= c(0, 12, 36)) +
+  facet_wrap(~animal)+
+  ylab('VL (cps/mL plasma)') +
+  xlab('Weeks Post-TX') +
+  ggtitle('aIL10 - Arranged by VL AUC (low -> high)') +
+  theme_classic() +
+  theme(legend.position = 'none')
+
+vl.per.animal.control <- vl %>% 
+  filter(week > 0, group == 'Control') %>% 
+  mutate(animal = factor(animal, levels = auc.all.animals$animal)) %>% 
+  ggplot(aes(x = week, y = VL, colour = animal)) +
+  geom_point(shape = NA) +
+  geom_line(size = 1, color = 'black') +
+  geom_segment(aes(x = 12 , y = 0, xend = 12, yend = 1e6), linetype = 2,
+               colour = "black") +
+  annotate("label", label = "ATI", 
+           x = 12, y = 5e6, size = 3, colour = "black")+
+  scale_y_continuous(trans = 'log10', 
+                     breaks = c(10, 1e2, 1e3, 1e4, 1e5, 1e6)) +
+  scale_x_continuous(breaks= c(0, 12, 36)) +
+  facet_wrap(~animal)+
+  ylab('VL (cps/mL plasma)') +
+  xlab('Weeks Post-TX') +
+  ggtitle('Control - Arranged by VL AUC (low -> high)') +
+  theme_classic() +
+  theme(legend.position = 'none') 
+
+vl.per.animal.combo <- vl %>% 
+  filter(week > 0, group == 'aIL-10+aPD-1') %>% 
+  mutate(animal = factor(animal, levels = auc.all.animals$animal)) %>% 
+  ggplot(aes(x = week, y = VL, colour = animal)) +
+  geom_point(shape = NA) +
+  geom_line(size = 1, color = 'blue') +
+  geom_segment(aes(x = 12 , y = 0, xend = 12, yend = 1e6), linetype = 2,
+               colour = "black") +
+  annotate("label", label = "ATI", 
+           x = 12, y = 5e6, size = 3, colour = "black")+
+  scale_y_continuous(trans = 'log10', 
+                     breaks = c(10, 1e2, 1e3, 1e4, 1e5, 1e6)) +
+  scale_x_continuous(breaks= c(0, 12, 36)) +
+  facet_wrap(~animal)+
+  ylab('VL (cps/mL plasma)') +
+  xlab('Weeks Post-TX') +
+  ggtitle('aIL-10+aPD-1 - Arranged by VL AUC (low -> high)') +
+  theme_classic() +
+  theme(legend.position = 'none')
+
+ggsave('results/figures/vl_arranged_by_auc_combo.pdf', vl.per.animal.combo, scale = 0.7)
+ggsave('results/figures/vl_arranged_by_auc_ail10.pdf', vl.per.animal.ail10, scale = 0.7)
+ggsave('results/figures/vl_arranged_by_auc_control.pdf', vl.per.animal.control, scale = 0.7)
+```
+
