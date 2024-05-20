@@ -2855,7 +2855,6 @@ dotplot <- bind_ora |>
 
 ```
 
-
 ```{r pyscenic}
 ln.obj <- readRDS('data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar.rds')
 
