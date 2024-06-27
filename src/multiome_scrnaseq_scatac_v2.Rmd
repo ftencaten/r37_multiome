@@ -2319,11 +2319,15 @@ ln.obj <- readRDS('data/processed/new/ln.integrated.fine.annot.geneactivity.chro
 DefaultAssay(ln.obj) <- 'peaks'
 Idents(ln.obj) <- ln.obj$manual.annotation
 
-ifn.genes.peaks = c("IFNG", "IFNA8", "IFNA6", "IFNA14", "IFNA16", "IFNB1", "IFNK", "IFNL1")
+ifn.genes.peaks = c("IFNG", "IFNA8", "IFNA6", "IFNA14", "IFNA16", "IFNB1", "IFNL1")
 
-cvg.plot.ifn <- CoveragePlot(ln.obj, region = ifn.genes.peaks, ymax = 50, peaks = F, ncol = 2) 
+cvg.plot.ifn <- CoveragePlot(ln.obj, region = ifn.genes.peaks, ymax = 50, 
+                             peaks = F, ncol = 2) &
+  scale_x_continuous(n.breaks = 3) &
+  theme(axis.text.x = element_text(size = 6))
 
-ggsave('coverage_plot_interferon.pdf', cvg.plot.ifn, width = 6.5, height = 12)
+ggsave('results/figures/new/coverage_plot_interferon.pdf', 
+       cvg.plot.ifn, width = 6.5, height = 12)
 
 inf.expr <- FeaturePlot(ln.obj, reduction = 'wnn.umap', 
             features = c('IFNG', 'IFNL1'), max.cutoff = 'q90',
