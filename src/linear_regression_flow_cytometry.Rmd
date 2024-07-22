@@ -437,7 +437,7 @@ ltr.p <- modulated.features.data |>
                      labels = c('2','3','4'),
                      breaks = c(1e2, 1e3, 1e4))+
   ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
-  xlab('Log 2LTR - LNMCs\nWeek 24 post-ATI') +   
+  xlab('Log 2-LTR - LNMCs\nWeek 24 post-ATI') +   
   theme_prism() +
   theme(legend.title = element_text())
   
