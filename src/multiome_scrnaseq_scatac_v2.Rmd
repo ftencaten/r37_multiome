@@ -1062,18 +1062,22 @@ manual.annotation <- t.cell.obj@meta.data %>%
                                             seurat_clusters %in% c('16', '5')  ~ 'CD8 T Eff/Mem',
                                             seurat_clusters %in% c('0', '13')  ~ 'Treg',
                                             seurat_clusters %in% c('8', '11')  ~ 'Tfh',
-                                            seurat_clusters %in% c('10', '15')  ~ 'CD4 T Intermediate',
+                                            #seurat_clusters %in% c('10', '15')  ~ 'CD4 T Intermediate',
+                                            seurat_clusters %in% c('10', '15')  ~ 'CD4 T Transitional',
                                             seurat_clusters == '14'  ~ 'Cycling CD4/CD8',
                                             seurat_clusters == '12'  ~ 'Th2/Th17',
                                             seurat_clusters == '17'  ~ 'Th1'))
 
 t.cell.obj$manual.annotation.fine <- manual.annotation$manual.annotation.fine
+
+cols.vec <- c("#1F78B4", "#A6CEE3", "#33A02C", "#B2DF8A", "#E31A1C",
+              "#FB9A99", "#FF7F00", "#FDBF6F",  "#CAB2D6")
  
 umap.tcell <- DimPlot(t.cell.obj, group.by = 'manual.annotation.fine',   
-        reduction = 'wnn.umap', label.size = 5, 
-        cols = RColorBrewer::brewer.pal(9,'Paired')) + ggtitle('T cell subsets')
+        reduction = 'wnn.umap', label.size = 5, cols = cols.vec) + 
+  ggtitle('T cell subsets')
 
-#ggsave('results/figures/new/umap_tcell_subsets.png', 
+#ggsave('results/figures/new/umap_tcell_subsets_v2.png', 
 #       umap.tcell, width = 6.5, height = 3.5, dpi = 'retina', bg = 'white')
 
 Idents(t.cell.obj) <- t.cell.obj$manual.annotation.fine
@@ -1084,7 +1088,7 @@ subset.dotpot <- DotPlot(t.cell.obj, features = c(unique(t.cell.markers$gene.sym
   theme(axis.text.x = element_text(size=10)) +
   ylab('T cell subset')
 
-ggsave('results/figures/new/dotplot_tcell_subsets_marker_genes.png', 
+ggsave('results/figures/new/dotplot_tcell_subsets_marker_genes_v2.png', 
        subset.dotpot, width = 12.5, height = 3.5, dpi = 'retina', bg = 'white')
 
 #### Density Plots + Feature Plots
