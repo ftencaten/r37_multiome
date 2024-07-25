@@ -849,25 +849,26 @@ ln.obj <- AddModuleScore(ln.obj, features = list(antiviral.isg = antiviral.isgs)
                          name = 'Antiviral.ISGs')
 
 ifng.p <- FeaturePlot(ln.obj, features = 'IFNG', reduction = 'wnn.umap',
-                      min.cutoff = 'q1', max.cutoff = 'q90', cols = c('lightgrey', 'red'))
+                      min.cutoff = 'q1', max.cutoff = 'q60', cols = c('lightgrey', 'red3'))
 
 stat1.p <-FeaturePlot(ln.obj, features = 'STAT1', reduction = 'wnn.umap', 
-                      min.cutoff = 'q1', max.cutoff = 'q90', cols = c('lightgrey', 'red'))
+                      min.cutoff = 'q1', max.cutoff = 'q60', cols = c('lightgrey', 'red3'))
 
 bst2.p <-FeaturePlot(ln.obj, features = 'BST2', reduction = 'wnn.umap', 
-                      min.cutoff = 'q1', max.cutoff = 'q90', cols = c('lightgrey', 'red'))
+                      min.cutoff = 'q1', max.cutoff = 'q60', cols = c('lightgrey', 'red3'))
 
-antiviral.p <- FeaturePlot(ln.obj, features = 'Antiviral.ISGs1', reduction = 'wnn.umap',
-                           min.cutoff = 'q1', max.cutoff = 'q90' ,cols = c('lightgrey', 'red')) +
+antiviral.p <- FeaturePlot(ln.obj, features = 'Antiviral.ISGs1', reduction = 'wnn.umap', pt.size = 0.1,
+                           min.cutoff = 'q1', max.cutoff = 'q60' ,cols = c('lightgrey', 'red3')) +
   ggtitle('Antiviral ISGs')
 
 p <- ifng.p + stat1.p + bst2.p+ antiviral.p + plot_layout(ncol = 2)
+
+ggsave('results/figures/new/umap_ln_IFNG_STAT1_Antiviral.png', p, 
+       dpi = 'retina', width = 7.5, height = 6)
+
 p <- ifng.p + antiviral.p + plot_layout(ncol = 2)
 
-#ggsave('results/figures/new/umap_ln_IFNG_STAT1_Antiviral.png', p, 
-#       dpi = 'retina', width = 7.5, height = 6)
-
-ggsave('results/figures/new/umap_ln_IFNG_Antiviral_module.png', p, 
+ggsave('results/figures/new/umap_ln_IFNG_Antiviral_module_v2.png', p, 
        dpi = 'retina', width = 9.5, height = 4)
 
 Idents(ln.obj) <- ln.obj$manual.annotation.fine
