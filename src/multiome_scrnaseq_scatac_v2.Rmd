@@ -848,16 +848,16 @@ createNetworkFromDataFrames(nodes = nodes.pathways.myeloid,
 ln.obj <- AddModuleScore(ln.obj, features = list(antiviral.isg = antiviral.isgs), 
                          name = 'Antiviral.ISGs')
 
-ifng.p <- FeaturePlot(ln.obj, features = 'IFNG', reduction = 'wnn.umap',
+ifng.p <- FeaturePlot(ln.obj, features = 'IFNG', reduction = 'wnn.umap', 
                       min.cutoff = 'q1', max.cutoff = 'q60', cols = c('lightgrey', 'red3'))
 
 stat1.p <-FeaturePlot(ln.obj, features = 'STAT1', reduction = 'wnn.umap', 
                       min.cutoff = 'q1', max.cutoff = 'q60', cols = c('lightgrey', 'red3'))
 
-bst2.p <-FeaturePlot(ln.obj, features = 'BST2', reduction = 'wnn.umap', 
+bst2.p <-FeaturePlot(ln.obj, features = 'BST2', reduction = 'wnn.umap',
                       min.cutoff = 'q1', max.cutoff = 'q60', cols = c('lightgrey', 'red3'))
 
-antiviral.p <- FeaturePlot(ln.obj, features = 'Antiviral.ISGs1', reduction = 'wnn.umap', pt.size = 0.1,
+antiviral.p <- FeaturePlot(ln.obj, features = 'Antiviral.ISGs1', reduction = 'wnn.umap', 
                            min.cutoff = 'q1', max.cutoff = 'q60' ,cols = c('lightgrey', 'red3')) +
   ggtitle('Antiviral ISGs')
 
