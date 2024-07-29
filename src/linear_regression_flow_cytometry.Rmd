@@ -212,6 +212,7 @@ modulated.features.cor <- modulated.features.data %>%
 
 #write_tsv(modulated.features.cor, 
 #          'results/spearman_correlation_all_modulated_features_vs_readouts.tsv')
+#modulated.features.cor <- read_tsv('results/spearman_correlation_all_modulated_features_vs_readouts.tsv')
 
 signif.correlated.features <- modulated.features.cor %>%
   filter(p.adj < 0.1, grepl('(IRF3|IRF7|STAT)', var2))
