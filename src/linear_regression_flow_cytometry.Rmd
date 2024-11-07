@@ -359,7 +359,7 @@ vl.p <- modulated.features.data |>
            method = 'spearman', size = 5, cor.coef.name = 'rho',
            label.y = 42) +
   scale_color_manual(values = c('red', 'blue'   , 'black' ), name = 'Group') +
-  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
+  ylab('CD4p TCM IRF7p\n Week 0 Pre−ATI − PBMC') +
   xlab('Log VL (cps/mL)') +   
   theme_prism() +
   theme(legend.title = element_text())
@@ -377,8 +377,8 @@ vdna.p <- modulated.features.data |>
            method = 'spearman', size = 5, cor.coef.name = 'rho',
            label.y = 42) +
   scale_color_manual(values = c('red', 'blue'   , 'black' ), name = 'Group') +
-  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
-  xlab('Log CA-vDNA - LNMCs\nWeek 24 post-ATI') +   
+  ylab('CD4p TCM IRF7p\n Week 0 Pre−ATI − PBMC') +
+  xlab('Log CA-vDNA - LNMCs\nWeek 24 Post-ATI') +   
   theme_prism() +
   theme(legend.title = element_text())
   
@@ -395,8 +395,8 @@ vrna.p <- modulated.features.data |>
            method = 'spearman', size = 5, cor.coef.name = 'rho',
            label.y = 42) +
   scale_color_manual(values = c('red', 'blue'   , 'black' ), name = 'Group') +
-  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
-  xlab('Log CA-vRNA - LNMCs\nWeek 24 post-ATI') +   
+  ylab('CD4p TCM IRF7p\n Week 0 Pre−ATI − PBMC') +
+  xlab('Log CA-vRNA - LNMCs\nWeek 24 Post-ATI') +   
   theme_prism() +
   theme(legend.title = element_text())
   
@@ -416,8 +416,8 @@ ipda.p <- modulated.features.data |>
   scale_x_continuous(transform = 'log10', 
                      labels = c('3','4','5'),
                      breaks = c(1e3, 1e4, 1e5))+
-  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
-  xlab('Log IPDA - LNMCs\nWeek 24 post-ATI') +   
+  ylab('CD4p TCM IRF7p\n Week 0 Pre−ATI − PBMC') +
+  xlab('Log IPDA - LNMCs\nWeek 24 Post-ATI') +   
   theme_prism() +
   theme(legend.title = element_text())
   
@@ -437,8 +437,8 @@ ltr.p <- modulated.features.data |>
   scale_x_continuous(transform = 'log10',
                      labels = c('2','3','4'),
                      breaks = c(1e2, 1e3, 1e4))+
-  ylab('CD4p TCM IRF7p\n Week 0 Post−ATI − PBMC') +
-  xlab('Log 2-LTR - LNMCs\nWeek 24 post-ATI') +   
+  ylab('CD4p TCM IRF7p\n Week 0 Pre−ATI − PBMC') +
+  xlab('Log 2-LTR - LNMCs\nWeek 24 Post-ATI') +   
   theme_prism() +
   theme(legend.title = element_text())
   
