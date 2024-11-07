@@ -625,6 +625,8 @@ isg.list <- gene_set_h |>
   arrange(gene_symbol) |> 
   deframe()
 
+#write_tsv(isg.list, 'data/processed/gene_set_IFN_pathways.tsv')
+
 ln.obj.markers.rna.isg <- ln.obj.markers.rna |> 
   filter(gene %in% isg.list)
 
@@ -1089,8 +1091,8 @@ subset.dotpot <- DotPlot(t.cell.obj, features = c(unique(t.cell.markers$gene.sym
   theme(axis.text.x = element_text(size=10)) +
   ylab('T cell subset')
 
-ggsave('results/figures/new/dotplot_tcell_subsets_marker_genes_v2.png', 
-       subset.dotpot, width = 12.5, height = 3.5, dpi = 'retina', bg = 'white')
+#ggsave('results/figures/new/dotplot_tcell_subsets_marker_genes_v2.png', 
+#       subset.dotpot, width = 12.5, height = 3.5, dpi = 'retina', bg = 'white')
 
 #### Density Plots + Feature Plots
 ctl <- plot_density(t.cell.obj, features = c('IFNG', 'GZMB', 'PRF1', 'TBX21'),
@@ -1098,6 +1100,13 @@ ctl <- plot_density(t.cell.obj, features = c('IFNG', 'GZMB', 'PRF1', 'TBX21'),
 
 #ggsave('results/figures/new/density_plot_effector_markers.png', ctl,
 #       dpi = 'retina', height = 8, width = 10)
+
+tbx21 <- plot_density(t.cell.obj, features = c('TBX21'),
+                    reduction = 'wnn.umap', pal = 'inferno')
+
+#ggsave('results/figures/new/density_plot_effector_markers_tbet.png', tbx21,
+#       dpi = 'retina', height = 4, width = 5)
+
 
 ctl.expr  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
                          features = c('IFNG', 'GZMB', 'PRF1', 'CCL5'), 
@@ -1160,17 +1169,39 @@ ec_mono_geneset <- ec_mono_pathways |>
   arrange(gs_name, gene_symbol) |> 
   unique()
 
+ec_total_pathways <- readxl::read_excel('data/raw/DEG_2000HIV_by_celltype_groups_PBMC.xlsx')
+
+ec_total_geneset <- ec_total_pathways |> 
+  filter(comparison == 'EC_vs_nonHIC', celltype %in% c('CD4_T_cells', 'CD8_T_cells',
+                                                       "Monocytes_classical", 
+                                                       "Monocytes_non_classical")) |> 
+#  filter(comparison == 'EC_vs_nonHIC') |> 
+  unite('gs_name', c(comparison, regulation)) |> 
+  dplyr::select(gs_name, gene) |> 
+  dplyr::rename(gene_symbol = gene) |> 
+  arrange(gs_name, gene_symbol) |> 
+  unique()
+
+#write_tsv(ec_total_geneset, 'data/raw/ECs_DEGs_CD4_CD8_Monocytes.tsv')
+
 manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx') |> 
   mutate(gs_name = sub('(_Schoggins_2011|_Abdel-Mohsen_2015)', '', gs_name))
 
-x <- manual_pathways |> 
-  mutate(value = 1) |> 
-  select(-source) |> 
-  pivot_wider(names_from = gs_name, values_from = value) |>   
-  dplyr::mutate(across(-gene_symbol, ~ifelse(. == 1, gene_symbol, NA))) |> 
-  select(-gene_symbol)
+library(decoupleR)
+net <- get_dorothea(levels = c('A', 'B', 'C', 'D'))
 
-write_clip(x)
+#gene_set_dorothea <- net |> 
+#  filter(mor > 0, confidence %in% c('A', 'B', 'C', 'D')) |> 
+#  select(source, target)
+#write_tsv(net, 'data/raw/gene_set_dorothea.txt')
+gene_set_dorothea <- read_tsv('data/raw/gene_set_dorothea.txt')  |> 
+  filter(confidence != 'D') |> 
+  select(source, target) 
+
+gene_set_smad <-msigdbr::msigdbr() |> 
+  filter(grepl('SMAD', gs_name)) |> 
+  select(gs_name, gene_symbol) %>%
+  unique()
 
 gene_set_c7 <-msigdbr::msigdbr(category = 'C7') %>%  
   select(gs_name, gene_symbol) %>%
@@ -1186,13 +1217,22 @@ gene_set_c3 <-msigdbr::msigdbr(category = 'C2')  |>
   select(gs_name, gene_symbol) %>%
   unique()
 
+smad.targets <- readxl::read_excel('data/raw/SMAD2_SMAD3 target gene list.xlsx')
+
+smad.targets.geneset <- smad.targets |> 
+  mutate(gs_name = 'KOINUMA_TARGETS_OF_SMAD2_OR_SMAD3') |> 
+  relocate(gs_name) |> 
+  rename(gene_symbol = KOINUMA_TARGETS_OF_SMAD2_OR_SMAD3)
+
 gene_set_h_manual <- msigdbr::msigdbr(category = 'H') %>%  
   select(gs_name, gene_symbol) %>% 
   bind_rows(manual_pathways %>% 
               select(gs_name, gene_symbol))  |> 
-  bind_rows(ec_mono_geneset) |> 
+#  bind_rows(ec_mono_geneset) |> 
+  bind_rows(ec_total_geneset) |> 
 #  bind_rows(gene_set_c3) |> 
-#  bind_rows(epigenetic) |>
+  bind_rows(epigenetic) |>
+#  bind_rows(smad.targets.geneset) |>
 #  bind_rows(kg_epigenetic) |>
 #  bind_rows(dnmt3_tf) |>
 #  bind_rows(gene_set_smad_methyl) |>
@@ -1239,10 +1279,14 @@ ora.list.down <- compareCluster(gene.list.down, fun = 'enricher',
                                 TERM2GENE = gene_set_h_manual,
                                 universe = rownames(t.cell.obj))
 
+#write_tsv(ora.list.down@compareClusterResult, 'smad_pathways_down.tsv')
+
 #write_tsv(ora.list.down@compareClusterResult, 
 #          'results/figures/new/ORA_Tcells_Low_vs_High_SIVDNA_down.tsv')
 
-ora.plot.up <- dotplot(ora.list.up %>% filter(Count >= 3) %>% 
+ora.plot.up <- dotplot(ora.list.up %>% 
+                         #filter(qvalue <= 1e-3) %>% 
+                         filter(Count >= 3) %>% 
                          mutate(Description = sub('HALLMARK', '', Description)), 
         label_format = 50, size = 'Count', showCategory = Inf) +
   scale_fill_gradient(low = 'red4', high = 'indianred1') + 
@@ -1258,7 +1302,9 @@ genes.up.network <- cnetplot(ora.list.up %>% filter(Count >= 3), shadowtext = 'n
 #ggsave('results/figures/new/network_ora_up_tcell.ln.pdf', genes.up.network,
 #       scale = 0.6, device = 'pdf')
 
-ora.plot.down <- dotplot(ora.list.down %>% filter(Count >= 3) %>% 
+ora.plot.down <- dotplot(ora.list.down %>% 
+                           #filter(qvalue <= 1e-3) %>% 
+                           filter(Count >= 3) %>% 
                          mutate(Description = sub('HALLMARK', '', Description)), 
         label_format = 50, size = 'Count',  showCategory = Inf) +
   scale_fill_gradient(low = 'blue4', high = 'skyblue') + 
@@ -1275,15 +1321,20 @@ genes.down.network <- cnetplot(ora.list.down %>% filter(Count >= 3), shadowtext 
 #       scale = 0.6, device = 'pdf')
 
 bind_ora <- bind_rows(list(up = ora.list.up@compareClusterResult,
-                    down = ora.list.down@compareClusterResult), .id = 'id') |> 
+                    down = ora.list.down@compareClusterResult), .id = 'id') |>
+  #filter(qvalue <= 1e-3) %>%
   filter(Count >= 3) |> 
-  mutate(ID = sub('HALLMARK_', '', ID))
+  mutate(ID = sub('HALLMARK_', '', ID)) |> 
+  group_by(Cluster, ID) |> 
+  slice_min(qvalue)
 
 #write_tsv(bind_ora, 'results/ORA_hallmark_epigenetics.tsv')
 
 mat <- bind_ora %>% 
   dplyr::mutate(Count = ifelse(id == 'down', -1, 1)) |> 
-  dplyr::select(Cluster, ID, Count) |>  
+  dplyr::select(Cluster, ID, Count)  |> 
+  arrange(desc(Count), ID) |> 
+  #pivot_wider(names_from = Cluster, values_from = Count)
   pivot_wider(names_from = Cluster, values_from = Count, values_fill = 0) |> 
   column_to_rownames('ID') |> 
   as.matrix()
@@ -1292,8 +1343,9 @@ clust.row  <- hclust(dist(mat))
 clust.column  <- hclust(dist(t(mat)))
 
 dotplot <- bind_ora |> 
-  dplyr::mutate(ID = factor(ID, levels = clust.row$labels ),
-                Cluster = factor(Cluster, levels = clust.column$labels )) |> 
+  dplyr::mutate(ID = factor(ID, levels = rownames(mat) )) |> 
+#                Cluster = factor(Cluster, levels = clust.column$labels )) |> 
+#    dplyr::mutate(Cluster = factor(Cluster, levels = clust.column$labels )) |> 
   ggplot(aes(x = Cluster, y = ID)) + 
          geom_point(aes(size = Count, fill = id), shape = 21) +
          theme_bw(base_size = 12) +
@@ -1302,8 +1354,8 @@ dotplot <- bind_ora |>
   labs(x = '', y = '')+
   theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 13))
 
-ggsave('results/figures/new/dotplot_ORA_tcell.ln.pdf', dotplot,
-       device = 'pdf', height = 4.5, width = 8)
+#ggsave('results/figures/new/dotplot_ORA_tcell.ln_v2.pdf', dotplot,
+#       device = 'pdf', height = 4.5, width = 8)
 #ggsave('results/figures/new/dotplot_ORA_tcell.ln_TFtargets.pdf', dotplot,
 #       device = 'pdf', scale = 0.8)
 #ggsave('results/figures/new/dotplot_ORA_tcell.ln_epigenetics.pdf', dotplot,
@@ -1344,6 +1396,81 @@ Heatmap(t(irf7.up.le), name = 'log2FoldChange', cluster_rows = F, cluster_column
         column_names_rot = 45, width = unit(5, "cm"), height = unit(9, 'cm'),
         rect_gp = gpar(col = "black", lwd = 0.2), 
         row_names_gp = gpar(fontsize = 8))
+
+### CEPBP targets
+library(decoupleR)
+net <- get_dorothea(levels = c('A', 'B', 'C', 'D'))
+
+gene_set_dorothea <- net |> 
+  filter(mor > 0, confidence %in% c('A', 'B', 'C', 'D')) |> 
+  select(source, target)
+
+cebpb.targets.level <- net |> 
+  filter(mor > 0, confidence %in% c('A', 'B', 'C', 'D')) |> 
+  filter(grepl('CEBPB', source)) |> 
+  arrange(confidence, target)
+
+#write_tsv(cebpb.targets.level, 'data/cebpb_targets_dorothea.tsv')
+cebpb.targets.level <- read_tsv('data/cebpb_targets_dorothea.tsv')
+
+cebpb.targets <- gene_set_dorothea |> 
+  filter(grepl('CEBPB', source)) |> 
+  select(target) |> deframe()
+
+df.up <- plyr::ldply(gene.list.up, data.frame) |> 
+  dplyr::rename(Cluster = `.id`, geneID = `X..i..`) 
+
+df.down <- plyr::ldply(gene.list.down, data.frame) |> 
+  dplyr::rename(Cluster = `.id`, geneID = `X..i..`) 
+
+cebpb.targets.up <- df.up |> 
+  filter(geneID %in% cebpb.targets.level$target)|> 
+  mutate(direction = 'up')
+
+cebpb.targets.down <- df.down |> 
+  filter(geneID %in% cebpb.targets.level$target) |> 
+  mutate(direction = 'down')
+
+cebpb.targets.degs <- cebpb.targets.up |> 
+  bind_rows(cebpb.targets.down)
+
+#write_tsv(cebpb.targets.degs, 'results/CEBPB_targets_DEG_low_vs_high.tsv')
+
+degs.df <- bind_rows(lapply(degs.list, 
+                            function(x) x |> 
+                              rownames_to_column('geneID')), .id = 'Cluster') |> 
+  dplyr::select(Cluster, geneID, p_val_adj, avg_log2FC)
+
+cebpb.up.le <- cebpb.targets.degs |> 
+  left_join(degs.df) |> 
+  select(Cluster, geneID, avg_log2FC) |> 
+  unique()  |> 
+  filter(avg_log2FC > log2(1.5) | avg_log2FC < -log2(1.5)) |> 
+  pivot_wider(names_from = 'geneID', values_from = 'avg_log2FC') |> 
+  column_to_rownames('Cluster') 
+   
+  
+Heatmap(t(cebpb.up.le), name = 'log2FoldChange', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(colors = c('darkblue', 'blue', 'white', 'red', 'darkred'), 
+                         breaks = c(-10, -5, 0, 5, 10)), 
+        column_names_rot = 45, width = unit(5, "cm"), height = unit(11, 'cm'),
+        rect_gp = gpar(col = "black", lwd = 0.2), 
+        row_names_gp = gpar(fontsize = 7))
+
+cebpb_targets.selected.umap  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                                    features = c('IRF9', 'LTBP1'),
+                                    max.cutoff = 'q90', min.cutoff = 'q1', 
+                                    cols = c('lightgrey', 'red'))
+
+ggsave('results/figures/new/cebpb_targets_umap_plot_tcell_selected.png',
+       cebpb_targets.selected.umap , dpi = 'retina', height = 4, width = 10)
+
+cebpb_targets.selected.down.umap  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                                    features = c('FOS', 'HDAC9'),
+                                    max.cutoff = 'q90', min.cutoff = 'q1', 
+                                    cols = c('lightgrey', 'blue'))
+ggsave('results/figures/new/cebpb_targets_down_umap_plot_tcell_selected.png',
+       cebpb_targets.selected.down.umap , dpi = 'retina', height = 4, width = 10)
 
 ### SMAD Targets
 smad.targets <- gene_set_c3 |> 
@@ -1422,6 +1549,15 @@ Heatmap(t(tcell.tnf.le), name = 'log2FoldChange', cluster_rows = F, cluster_colu
         rect_gp = gpar(col = "black", lwd = 0.2), 
         row_names_gp = gpar(fontsize = 8))
 
+epigenetics.selected.umap  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
+                                    features = c('SMARCA2', 'SMARCA4', 
+                                                 'HDAC2','MECP2'),
+                                    max.cutoff = 'q90', min.cutoff = 'q1', 
+                                    cols = c('lightgrey', 'blue'))
+
+ggsave('results/figures/new/epigenetics_umap_plot_tcell_selected.png',
+       epigenetics.selected.umap , dpi = 'retina', height = 8, width = 10)
+
 antiviral.selected.umap  <- FeaturePlot(t.cell.obj, reduction = 'wnn.umap', 
                                     features = c('OAS2', 'DDX60', 
                                                  'EIF2AK2','Antiviral.ISGs1'),
@@ -1459,13 +1595,20 @@ ggsave('results/figures/new/irf7_targets_umap_plot_tcell_selected.png',
 
 #### Cytoscape network
 # UP
+selected.pathways <- c('ANTIVIRAL_ISGS', 'EC_vs_nonHIC_up', 
+                       'HALLMARK_INTERFERON_ALPHA_RESPONSE',
+                       'HALLMARK_INTERFERON_GAMMA_RESPONSE',
+                       'HIV_RESTRICTION_FACTORS')
+
 edges.tcell.up  <- ora.list.up@compareClusterResult |> 
-  filter(Count >= 3) |> 
+  #filter(Count >= 3) |> 
+  filter(Count >= 3, ID %in% selected.pathways, !grepl('CD8', Cluster)) |> 
   dplyr::select(ID, geneID) |> 
   mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID))) |> 
   separate_longer_delim(geneID, delim = '/') %>% 
   mutate(weigth = 1) %>% 
   rename(source = ID, target = geneID) |> 
+  arrange(source, target) |> 
   unique()
 
 node.size <- enframe(table(edges.tcell.up$source), name = 'ID') |> 
@@ -1481,35 +1624,58 @@ ec.up <- edges.tcell.up |>
   select(target) |> 
   deframe()
 
+cebpb.targets.level <- read_tsv('data/cebpb_targets_dorothea.tsv')
+
+cebpb.targets.up <- edges.tcell.up |> 
+  filter(target %in% cebpb.targets.level$target)|> 
+  select(target) |> 
+  unique() |> 
+  deframe()
+
 nodes.tcell.up <- ora.list.up@compareClusterResult %>% 
-  filter(Count >= 3) |> 
+  #filter(Count >= 3) |> 
+  filter(Count >= 3, ID %in% selected.pathways, !grepl('CD8', Cluster)) |> 
   select(Cluster, geneID) |>
   separate_longer_delim(geneID, delim = '/') |> 
   unique() |> 
   rename(ID = geneID) |> 
   bind_rows(ora.list.up@compareClusterResult %>% 
-              filter(Count >= 3) |> 
+              #filter(Count >= 3) |> 
+              filter(Count >= 3, ID %in% selected.pathways, !grepl('CD8', Cluster)) |>  
               select(Cluster, ID) |> 
               mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID)))) |>
   mutate(value = 1) |> 
   pivot_wider(names_from = Cluster, values_from = value, values_fill = 0) |>  
-  left_join(node.size) |> 
-  mutate(name = ifelse(ID %in% c(ec.up, unique(edges.tcell.up$source)), ID , NA),
-         class = ifelse(ID %in% unique(edges.tcell.up$source), 'pathway' , 'gene')) |> 
+  left_join(node.size)  |> 
+  mutate(name = ifelse(ID %in% c(ec.up, cebpb.targets.up,
+                                 unique(edges.tcell.up$source)), ID , NA),
+         ec.target = ifelse(ID %in% ec.up, 1 , 0),
+         cebpb.targets = ifelse(ID %in% cebpb.targets.up, 1 , 0),
+         class = ifelse(ID %in% unique(edges.tcell.up$source), 'pathway' , 'gene')) |>  
   rename(id = ID)
 
 createNetworkFromDataFrames(edges = edges.tcell.up,
                             nodes = nodes.tcell.up,
-                            title = "T cell - Upregulated Pathways")
+                            title = "T cell - Upregulated Pathways - V3")
+
+write_tsv(edges.tcell.up, 'results/figures/edges_Tcell_UP_EC_network.tsv')
+write_tsv(nodes.tcell.up, 'results/figures/nodes_Tcell_UP_EC_network.tsv')
 
 # DOWN
+selected.pathways <- c('HALLMARK_HYPOXIA', 'EC_vs_nonHIC_down',
+                       'HALLMARK_TNFA_SIGNALING_VIA_NFKB', 
+                       'HALLMARK_INFLAMMATORY_RESPONSE', 
+                       'HALLMARK_MTORC1_SIGNALING')
+
 edges.tcell.down  <- ora.list.down@compareClusterResult |> 
-  filter(Count >= 3) |> 
+  #filter(Count >= 3) |> 
+  filter(Count >= 3, ID %in% selected.pathways, !grepl('CD8', Cluster)) |> 
   dplyr::select(ID, geneID) |> 
   mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID))) |> 
   separate_longer_delim(geneID, delim = '/') %>% 
   mutate(weigth = 1) %>% 
-  rename(source = ID, target = geneID) |> 
+  rename(source = ID, target = geneID) |>
+  arrange(source, target) |> 
   unique()
 
 node.size <- enframe(table(edges.tcell.down$source), name = 'ID') |> 
@@ -1525,28 +1691,42 @@ ec.down <- edges.tcell.down |>
   select(target) |> 
   deframe()
 
+cebpb.targets.level <- read_tsv('data/cebpb_targets_dorothea.tsv')
+
+cebpb.targets.down <- edges.tcell.down |> 
+  filter(target %in% cebpb.targets.level$target) |> 
+  select(target) |> 
+  unique() |> 
+  deframe()
+
 nodes.tcell.down <- ora.list.down@compareClusterResult %>% 
-  filter(Count >= 3) |> 
+  #filter(Count >= 3) |> 
+  filter(Count >= 3, ID %in% selected.pathways, !grepl('CD8', Cluster)) |> 
   select(Cluster, geneID) |>
   separate_longer_delim(geneID, delim = '/') |> 
   unique() |> 
   rename(ID = geneID) |> 
   bind_rows(ora.list.down@compareClusterResult %>% 
-              filter(Count >= 3) |> 
+              #filter(Count >= 3) |> 
+              filter(Count >= 3, ID %in% selected.pathways, !grepl('CD8', Cluster)) |>  
               select(Cluster, ID) |> 
               mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID)))) |>
   mutate(value = 1) |> 
   pivot_wider(names_from = Cluster, values_from = value, values_fill = 0) |>  
   left_join(node.size) |> 
-  mutate(name = ifelse(ID %in% c(ec.down, unique(edges.tcell.down$source)), ID , NA),
+  mutate(name = ifelse(ID %in% c(ec.down, cebpb.targets.down,
+                                 unique(edges.tcell.down$source)), ID , NA),
+         ec.target = ifelse(ID %in% ec.down, 1 , 0),
+         cebpb.targets = ifelse(ID %in% cebpb.targets.down, 1 , 0),
          class = ifelse(ID %in% unique(edges.tcell.down$source), 'pathway' , 'gene')) |> 
   rename(id = ID)
 
 createNetworkFromDataFrames(edges = edges.tcell.down,
                             nodes = nodes.tcell.down,
-                            title = "T cell - Downregulated Pathways")
+                            title = "T cell - Downregulated Pathways - V3")
 
-
+write_tsv(edges.tcell.down, 'results/figures/edges_Tcell_DOWN_EC_network.tsv')
+write_tsv(nodes.tcell.down, 'results/figures/nodes_Tcell_DOWN_EC_network.tsv')
 
 ## ATAC - Low vs High SIV-DNA motif accessibility
 library(JASPAR2020)
@@ -1580,17 +1760,21 @@ motif.list.name <- bind_rows(motif.list, .id = 'id') %>%
   left_join(enframe(name(pfm))) %>% 
   dplyr::filter(p_val_adj < 0.05)
 
+#write_tsv(motif.list.name, 'results/tcell_TF_motif_access_high_vs_low.tsv')
+
 motif.mat <- motif.list.name |> 
   dplyr::select(id, value, avg_diff) |> 
   pivot_wider(names_from = 'id', values_from = 'avg_diff') |> 
   arrange(value) |> 
   column_to_rownames('value')
 
+# remove TFs significant in less than 2/3 of cell subsets
 motif.mat <- motif.mat[which(rowSums(is.na(motif.mat)) <= ncol(motif.mat)* 2/3),]
+# remove cell subsets with few significant TFs
 motif.mat <- motif.mat[, which(colSums(is.na(motif.mat)) <= nrow(motif.mat)*0.9)]
 
-#motif.mat <- motif.mat[which(rowSums(!is.na(motif.mat)) > ncol(motif.mat)* 0.5),]
-#motif.mat <- motif.mat[, which(colSums(is.na(motif.mat)) <= nrow(motif.mat)*0.9)]
+#write_tsv(motif.mat |> rownames_to_column('TF'), 
+#          'results/tcell_FC_motif_accesibility_FIG4A.tsv')
 
 motif.mat.to.cluster <- motif.list.name |> 
   dplyr::select(id, value, avg_diff) |> 
@@ -1609,17 +1793,7 @@ row.order <- clust.row$labels[clust.row$order]
 motif.mat.ordered <- motif.mat[row.order, col.order]
 
 motif.of.interest <- c('STAT1', 'STAT3', 'IRF3', 'IRF7', 'FOS', 'FOS::JUN', 
-                       'MAF::NFE2', "Smad2::Smad3", "GATA3", "TCF7")
-
-#motif.of.interest <- motif.list.name |> 
-#  dplyr::filter(id %in% colnames(motif.mat), 
-#                value %in% rownames(motif.mat)) |> 
-#  group_by(id) |> 
-  #slice_max(abs(avg_diff), n = 5) |> 
-#  slice_min(p_val, n = 5) |> 
-#  ungroup() |>  
-#  dplyr::select(value) |> 
-#  deframe()
+                       'MAF::NFE2', "Smad2::Smad3", "GATA3", "TCF7", 'CEBPB')
 
 motif.position <- which(rownames(motif.mat.ordered) %in% motif.of.interest)
 
@@ -1675,12 +1849,19 @@ myeloid.markers <- readxl::read_excel('data/raw/human.cell.surface.markers.xlsx'
 myeloid.obj <- FindClusters(myeloid.obj, graph.name = "wsnn", 
                             algorithm = 3, resolution = 0.5)
 
-DimPlot(myeloid.obj, reduction = 'wnn.umap', label = T, label.box = T, repel = T) + NoLegend()
+myeloid.cluster.umap <-DimPlot(myeloid.obj, reduction = 'wnn.umap', 
+                               label = T, label.box = T, repel = T) + NoLegend()
 
-DotPlot(myeloid.obj,  features = c(myeloid.markers$gene.symbol, 'SIGLEC1', 'MAF'), 
+#ggsave('results/figures/new/umap_myeloid_clusters.png', 
+#       myeloid.cluster.umap, scale = 0.5, dpi = 'retina', bg = 'white')
+
+myeloid.dotplot <- DotPlot(myeloid.obj,  features = c(myeloid.markers$gene.symbol, 'SIGLEC1', 'MAF'), 
         cluster.idents = T, dot.min = 0.01, scale.by = 'size', assay = 'RNA') +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
   scale_color_viridis_c(option = 'H')
+
+#ggsave('results/figures/new/dotplot_myeloid_cluster_annotation.pdf', 
+#       myeloid.dotplot, height = 4, width = 7.5, dpi = 'retina', bg = 'white')
 
 manual.annotation <- myeloid.obj@meta.data %>% 
   mutate(manual.annotation.fine = case_when(seurat_clusters %in% c('0', '2', '6') ~ 'FDCs',
@@ -1755,6 +1936,19 @@ ec_mono_geneset <- ec_mono_pathways |>
   arrange(gs_name, gene_symbol) |> 
   unique()
 
+ec_total_pathways <- readxl::read_excel('data/raw/DEG_2000HIV_by_celltype_groups_PBMC.xlsx')
+
+ec_total_geneset <- ec_total_pathways |> 
+  filter(comparison == 'EC_vs_nonHIC', celltype %in% c('CD4_T_cells', 'CD8_T_cells',
+                                                       "Monocytes_classical", 
+                                                       "Monocytes_non_classical")) |> 
+#  filter(comparison == 'EC_vs_nonHIC') |> 
+  unite('gs_name', c(comparison, regulation)) |> 
+  dplyr::select(gs_name, gene) |> 
+  dplyr::rename(gene_symbol = gene) |> 
+  arrange(gs_name, gene_symbol) |> 
+  unique()
+
 manual_pathways <- readxl::read_excel('data/raw/antiviral_isg_hiv_rf_pathways.xlsx') |> 
   mutate(gs_name = sub('(_Schoggins_2011|_Abdel-Mohsen_2015)', '', gs_name))
 
@@ -1766,7 +1960,7 @@ kg_epigenetic <- read.gmt('data/raw/gene_signatures/kg_epigenetics.gmt.txt') |>
   filter(gene != '') |> 
   rename(gs_name = term, gene_symbol = gene)
 
-gene_set_c3 <-msigdbr::msigdbr(category = 'C3')  |> 
+gene_set_c3 <-msigdbr::msigdbr(category = 'C3')   
   filter(grepl('TFT:TFT_Legacy', gs_subcat)) |> 
   select(gs_name, gene_symbol) %>%
   unique()
@@ -1775,8 +1969,8 @@ gene_set_h_manual <- msigdbr::msigdbr(category = 'H') %>%
   select(gs_name, gene_symbol) %>% 
   bind_rows(manual_pathways %>% 
               select(gs_name, gene_symbol)) %>% 
-  bind_rows(ec_mono_geneset) |> 
-#  bind_rows(epigenetic) |> 
+  bind_rows(ec_total_geneset) |> 
+  bind_rows(epigenetic) |> 
 #  bind_rows(kg_epigenetic) |> 
 #  bind_rows(gene_set_c3) |> 
   unique()
@@ -1832,6 +2026,7 @@ bind_ora <- bind_rows(list(up = ora.list.up@compareClusterResult,
 mat <- bind_ora %>% 
   dplyr::mutate(Count = ifelse(id == 'down', -1, 1)) |> 
   select(Cluster, ID, Count) |> 
+  arrange(desc(Count), ID) |> 
   pivot_wider(names_from = Cluster, values_from = Count, values_fill = 0) |>
   column_to_rownames('ID') |> 
   as.matrix()
@@ -1840,8 +2035,9 @@ clust.row  <- hclust(dist(mat) )
 clust.column  <- hclust(dist(t(mat)) )
 
 dotplot <- bind_ora |> 
-  dplyr::mutate(ID = factor(ID, levels = clust.row$labels[clust.row$order]),
-                Cluster = factor(Cluster, levels = clust.column$labels[clust.column$order])) |> 
+  dplyr::mutate(ID = factor(ID, levels = rownames(mat))) |>
+  #dplyr::mutate(ID = factor(ID, levels = clust.row$labels[clust.row$order]),
+  #              Cluster = factor(Cluster, levels = clust.column$labels[clust.column$order])) |>
   ggplot(aes(x = Cluster, y = ID)) + 
          geom_point(aes(size = Count, fill = id), shape = 21) +
          theme_bw(base_size = 12) +
@@ -1850,8 +2046,8 @@ dotplot <- bind_ora |>
   labs(x = '', y = '')+
   theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 13)) 
 
-ggsave('results/figures/new/dotplot_ORA_myeloid.ln.pdf', dotplot,
-       device = 'pdf', scale = 0.7)
+#ggsave('results/figures/new/dotplot_ORA_myeloid.ln_v2.pdf', dotplot,
+#       device = 'pdf', scale = 0.7)
 
 ### Represent leading edge genes
 degs.df <- bind_rows(lapply(degs.list, 
@@ -1916,6 +2112,7 @@ edges.myeloid.up  <- ora.list.up@compareClusterResult |>
   separate_longer_delim(geneID, delim = '/') %>% 
   mutate(weigth = 1) %>% 
   rename(source = ID, target = geneID) |> 
+  arrange(source, target) |> 
   unique()
 
 node.size <- enframe(table(edges.myeloid.up$source), name = 'ID') |> 
@@ -1950,16 +2147,24 @@ nodes.myeloid.up <- ora.list.up@compareClusterResult %>%
 
 createNetworkFromDataFrames(edges = edges.myeloid.up,
                             nodes = nodes.myeloid.up,
-                            title = "Myeloid - Upregulated Pathways")
+                            title = "Myeloid - Upregulated Pathways - V3")
+
+write_tsv(edges.myeloid.up, 'results/figures/edges_Myeloid_UP_EC_network.tsv')
+write_tsv(nodes.myeloid.up, 'results/figures/nodes_Myeloid_UP_EC_network.tsv')
 
 # DOWN
+selected.pathways <- c('HALLMARK_HYPOXIA', 'EC_vs_nonHIC_down',
+                       'HALLMARK_TNFA_SIGNALING_VIA_NFKB', 
+                       'HALLMARK_APOPTOSIS')
+
 edges.myeloid.down  <- ora.list.down@compareClusterResult |> 
-  filter(Count >= 3) |> 
+  filter(Count >= 3, ID %in% selected.pathways) |>  
   dplyr::select(ID, geneID) |> 
   mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID))) |> 
   separate_longer_delim(geneID, delim = '/') %>% 
   mutate(weigth = 1) %>% 
   rename(source = ID, target = geneID) |> 
+  arrange(source, target) |> 
   unique()
 
 node.size <- enframe(table(edges.myeloid.down$source), name = 'ID') |> 
@@ -1976,13 +2181,13 @@ ec.down <- edges.myeloid.down |>
   deframe()
 
 nodes.myeloid.down <- ora.list.down@compareClusterResult %>% 
-  filter(Count >= 3) |> 
+  filter(Count >= 3, ID %in% selected.pathways) |> 
   select(Cluster, geneID) |>
   separate_longer_delim(geneID, delim = '/') |> 
   unique() |> 
   rename(ID = geneID) |> 
   bind_rows(ora.list.down@compareClusterResult %>% 
-              filter(Count >= 3) |> 
+              filter(Count >= 3, ID %in% selected.pathways) |> 
               select(Cluster, ID) |> 
               mutate(ID = gsub('_', ' ', sub('HALLMARK_', '', ID)))) |>
   mutate(value = 1) |> 
@@ -1994,8 +2199,10 @@ nodes.myeloid.down <- ora.list.down@compareClusterResult %>%
 
 createNetworkFromDataFrames(edges = edges.myeloid.down,
                             nodes = nodes.myeloid.down,
-                            title = "Myeloid - Downregulated Pathways")
+                            title = "Myeloid - Downregulated Pathways - V3")
 
+write_tsv(edges.myeloid.down, 'results/figures/edges_Myeloid_DOWN_EC_network.tsv')
+write_tsv(nodes.myeloid.down, 'results/figures/nodes_Myeloid_DOWN_EC_network.tsv')
 
 ## ATAC Low vs High SIV-DNA chromatin accessibility
 DefaultAssay(myeloid.obj) <- 'chromvar'
@@ -2022,6 +2229,8 @@ motif.list.name <- bind_rows(motif.list, .id = 'id') %>%
   mutate(name = sub('\\.\\.\\..*', '', name)) %>% 
   left_join(enframe(name(pfm))) |> 
   dplyr::filter(p_val_adj < 0.05)
+
+#write_tsv(motif.list.name, 'results/myeloid_TF_motif_access_high_vs_low.tsv')
 
 motif.mat <- motif.list.name |> 
   dplyr::select(id, value, avg_diff) |> 
@@ -2089,6 +2298,15 @@ myeloid.atac.plot.selected <-  irf4.plot + irf7.plot + fos.plot + rfx2.plot  +
 ggsave('results/figures/new/umap_atac_myeloid_selected.png', 
        myeloid.atac.plot.selected, dpi = 'retina', height = 6, width = 8)
 
+
+## Merge myeloid and T cell
+myeloidtf <- read_tsv('results/myeloid_TF_motif_access_high_vs_low.tsv')
+tcelltf <- read_tsv('results/tcell_TF_motif_access_high_vs_low.tsv')
+
+tcell.myeloid.df <- tcelltf |> 
+  bind_rows(myeloidtf)
+
+#write_tsv(tcell.myeloid.df, 'results/TF_motif_access_high_vs_low.tsv')
 ```
 
 ```{r GEX/ATAC - Correl}
@@ -2331,8 +2549,16 @@ cvg.plot.ifn <- CoveragePlot(ln.obj, region = ifn.genes.peaks, ymax = 50,
   scale_x_continuous(n.breaks = 3) &
   theme(axis.text.x = element_text(size = 6))
 
-ggsave('results/figures/new/coverage_plot_interferon.pdf', 
-       cvg.plot.ifn, width = 6.5, height = 12)
+#ggsave('results/figures/new/coverage_plot_interferon.pdf', 
+#       cvg.plot.ifn, width = 6.5, height = 12)
+
+cvg.plot.il6 <- CoveragePlot(ln.obj, region = 'IL6', ymax = 50, 
+                             peaks = F, ncol = 2) &
+#  scale_x_continuous(n.breaks = 3) &
+  theme(axis.text.x = element_text(size = 6))
+
+#ggsave('results/figures/new/coverage_plot_IL6.pdf', 
+#       cvg.plot.il6, scale = 0.6)
 
 inf.expr <- FeaturePlot(ln.obj, reduction = 'wnn.umap', 
             features = c('IFNG', 'IFNL1'), max.cutoff = 'q90',
@@ -2356,11 +2582,27 @@ names(degs.list) <- idents
 
 degs.list.df <- bind_rows(degs.list, .id = 'cell_type') |> 
   rownames_to_column('geneid') |> 
-  mutate(geneid = sub('\\..*', '', geneid)) |> 
-  filter(p_val_adj < 0.1)
+  mutate(geneid = sub('\\..*', '', geneid)) 
+  filter(p_val_adj < 0.25)
 
-write_tsv(degs.list.df, 'degs_low_vs_high_sivdna.txt')
+#write_tsv(degs.list.df, 'degs_low_vs_high_sivdna.txt')
 degs.list.df <- read_tsv('degs_low_vs_high_sivdna.txt')
+
+tgfb1.df <- degs.list.df |> 
+  filter(geneid == 'TGFB1', p_val < 0.1) |> 
+  select(cell_type, geneid, avg_log2FC) |> 
+  unique() |> 
+  pivot_wider(names_from = 'geneid', values_from = 'avg_log2FC') |> 
+  column_to_rownames('cell_type')
+  
+Heatmap(t(tgfb1.df), name = 'log2FoldChange', cluster_rows = F, cluster_columns = F,
+        col = colorRamp2(colors = c('darkred', 'red', 'white','blue', 'darkblue'), 
+                         breaks = c(1, 0.5, 0,-0.5, -1)), 
+        column_names_rot = 45, width = unit(3, "cm"), height = unit(0.5, 'cm'),
+        rect_gp = gpar(col = "black", lwd = 0.2), 
+        row_names_gp = gpar(fontsize = 8), column_names_gp = gpar(fontsize = 8))
+
+
 
 ## Load gene sets
 ec_mono_pathways <- readxl::read_excel('data/raw/DEG_monocytes_EC vs non-HIC.xlsx') 
@@ -2410,7 +2652,7 @@ ora.list.up <- compareCluster(gene.list.up, fun = 'enricher',
                               universe = rownames(ln.obj))
 
 ora.list.down <- compareCluster(gene.list.down, fun = 'enricher', 
-                                TERM2GENE = gene_set_h_manual,
+                                TERM2GENE = gene_set_h,
                                 universe = rownames(ln.obj))
 
 bind_ora <- bind_rows(list(up = ora.list.up@compareClusterResult,
@@ -2751,8 +2993,471 @@ for (i in 1:length(object.list)) {
 
 ```
 
+```{r Nichenet}
+library(nichenetr)
+
+ln.obj <- readRDS('data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar_v2.rds')
+Idents(ln.obj) <- ln.obj$manual.annotation.fine
+
+# Human
+lr_network <- readRDS('data/raw/nichenet/lr_network_human_21122021.rds')
+ligand_target_matrix <- readRDS('data/raw/nichenet/ligand_target_matrix_nsga2r_final.rds')
+weighted_networks <- readRDS('data/raw/nichenet/weighted_networks_nsga2r_final.rds')
+
+### CD4 INTERMEDIATE ----
+## Define a set of potential ligands for both the sender-agnostic and sender-focused approach
+receiver = "CD4 T Intermediate"
+expressed_genes_receiver <- get_expressed_genes(receiver, ln.obj, pct = 0.01)
+
+all_receptors <- unique(lr_network$to)  
+expressed_receptors <- intersect(all_receptors, expressed_genes_receiver)
+potential_ligands <- lr_network %>% 
+  filter(to %in% expressed_receptors) %>% 
+  pull(from) %>% unique()
+
+sender_celltypes <- unique(ln.obj$manual.annotation.fine)
+
+# Use lapply to get the expressed genes of every sender cell type separately here
+list_expressed_genes_sender <- sender_celltypes %>% unique() %>% 
+  lapply(get_expressed_genes, ln.obj, 0.05)
+
+expressed_genes_sender <- list_expressed_genes_sender %>% unlist() %>% unique()
+
+potential_ligands_focused <- intersect(potential_ligands, expressed_genes_sender) 
+
+## Define the gene set of interest
+seurat_obj_receiver <- subset(ln.obj, idents = receiver)
+
+DE_table_receiver <-  FindMarkers(object = seurat_obj_receiver,
+                                  ident.1 = 'low', ident.2 = 'high',
+                                  group.by = "siv.dna.group",
+                                  min.pct = 0.05) %>% rownames_to_column("gene")
+
+geneset_low <- DE_table_receiver %>% 
+  filter(p_val_adj <= 0.1, avg_log2FC > 0) %>% pull(gene)
+geneset_low <- geneset_low %>% .[. %in% rownames(ligand_target_matrix)]
+
+## Define the background genes
+background_expressed_genes <- expressed_genes_receiver %>% 
+  .[. %in% rownames(ligand_target_matrix)]
+
+## Perform NicheNet ligand activity analysis
+ligand_activities_all <- predict_ligand_activities(geneset = geneset_low,
+                        background_expressed_genes = background_expressed_genes,
+                        ligand_target_matrix = ligand_target_matrix,
+                        potential_ligands = potential_ligands)
+
+ligand_activities_all <- ligand_activities_all %>% 
+  arrange(-aupr_corrected) %>% mutate(rank = rank(desc(aupr_corrected)))
+
+best_upstream_ligands_all <- ligand_activities_all %>% 
+  top_n(15, aupr_corrected) %>% arrange(-aupr_corrected) %>% pull(test_ligand)
+
+ligand_activities <- ligand_activities %>% 
+  filter(test_ligand %in% potential_ligands_focused)
+
+best_upstream_ligands <- ligand_activities %>% 
+  top_n(15, aupr_corrected) %>% 
+  arrange(-aupr_corrected) %>%
+  pull(test_ligand) %>% unique()
+
+## Ligand AUPR Plot
+ligand_aupr_matrix <- ligand_activities %>% 
+  filter(test_ligand %in% best_upstream_ligands) %>%
+  column_to_rownames("test_ligand") %>% 
+  select(aupr_corrected) %>% arrange(aupr_corrected)
+
+vis_ligand_aupr <- as.matrix(ligand_aupr_matrix, ncol = 1) 
+
+p_ligand_aupr <- make_heatmap_ggplot(vis_ligand_aupr,
+                                     "Prioritized ligands", "Ligand activity", 
+                                     legend_title = "AUPR", color = "darkorange") +
+  theme(axis.text.x.top = element_blank())
+
+p_ligand_aupr
+
+# Target gene plot
+active_ligand_target_links_df <- best_upstream_ligands %>%
+  lapply(get_weighted_ligand_target_links,
+         geneset = geneset_low,
+         ligand_target_matrix = ligand_target_matrix,
+         n = 100) %>%
+  bind_rows() %>% drop_na()
+
+active_ligand_target_links <- prepare_ligand_target_visualization(
+  ligand_target_df = active_ligand_target_links_df,
+  ligand_target_matrix = ligand_target_matrix,
+  cutoff = 0.1) 
+
+order_ligands <- intersect(best_upstream_ligands, 
+                           colnames(active_ligand_target_links)) %>% rev()
+
+order_targets <- active_ligand_target_links_df$target %>% 
+  unique() %>% 
+  intersect(rownames(active_ligand_target_links))
+
+vis_ligand_target <- t(active_ligand_target_links[order_targets,order_ligands])
+
+p_ligand_target <- make_heatmap_ggplot(vis_ligand_target, "Prioritized ligands", 
+                                       "Predicted target genes", color = "purple",
+                                       legend_title = "Regulatory potential") +
+  scale_fill_gradient2(low = "whitesmoke",  high = "purple")
+
+p_ligand_target
+
+# Receptor plot
+ligand_receptor_links_df <- get_weighted_ligand_receptor_links(
+  best_upstream_ligands, expressed_receptors,
+  lr_network, weighted_networks$lr_sig) 
+
+vis_ligand_receptor_network <- prepare_ligand_receptor_visualization(
+  ligand_receptor_links_df,
+  best_upstream_ligands,
+  order_hclust = "both") 
+
+p_ligand_receptor <- make_heatmap_ggplot(t(vis_ligand_receptor_network), 
+                     y_name = "Ligands", x_name = "Receptors",  
+                     color = "mediumvioletred", legend_title = "Prior interaction potential")
+
+p_ligand_receptor
+
+## Visualizing expression and log-fold change in sender cells
+# Dotplot of sender-focused approach
+p_dotplot <- DotPlot(subset(ln.obj, manual.annotation.fine %in% sender_celltypes),
+        features = rev(best_upstream_ligands), cols = "RdYlBu") + 
+  coord_flip() +
+  scale_y_discrete(position = "right")
+
+p_dotplot
+
+## Combined plot
+figures_without_legend <- cowplot::plot_grid(
+  p_ligand_aupr + theme(legend.position = "none"),
+#  p_dotplot + theme(legend.position = "none",
+#                    axis.ticks = element_blank(),
+#                    axis.title.y = element_blank(),
+#                    axis.title.x = element_text(size = 12),
+#                    axis.text.y = element_text(size = 9),
+#                    axis.text.x = element_text(size = 9,  angle = 45, hjust = 0)) +
+#    ylab("Expression in Sender"),
+#  p_lfc + theme(legend.position = "none",
+#                axis.title.y = element_blank()),
+  p_ligand_target + theme(legend.position = "none",
+                          axis.title.y = element_blank()),
+  align = "hv",
+  nrow = 1,
+  rel_widths = c(ncol(vis_ligand_aupr)+6, 
+#                 ncol(vis_ligand_lfc)+7, 
+#                 ncol(vis_ligand_lfc)+8, 
+                 ncol(vis_ligand_target)))
+
+legends <- cowplot::plot_grid(
+    ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_aupr)),
+#    ggpubr::as_ggplot(ggpubr::get_legend(p_dotplot)),
+#    ggpubr::as_ggplot(ggpubr::get_legend(p_lfc)),
+    ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target)),
+    nrow = 1,
+    align = "h", rel_widths = c(1.5, 1, 1, 1))
+
+combined_plot <-  cowplot::plot_grid(figures_without_legend, legends, 
+                                     rel_heights = c(10,5), nrow = 2, align = "hv")
+
+combined_plot
+
+ggsave('results/figures/new/nichenet_combined_plot_CD4_Transitional_pos.pdf',
+       combined_plot)
+
+vlnplot <- VlnPlot(ln.obj, features = c('IFNG', 'IL10', 'IL1B'), ncol = 1)
+ggsave('results/figures/new/violinplot_IFNG_IL10_IL1B.png',
+       vlnplot, height = 9, width = 5)
+
+### TFH ----
+## Define a set of potential ligands for both the sender-agnostic and sender-focused approach
+receiver = "Tfh"
+expressed_genes_receiver <- get_expressed_genes(receiver, ln.obj, pct = 0.01)
+
+all_receptors <- unique(lr_network$to)  
+expressed_receptors <- intersect(all_receptors, expressed_genes_receiver)
+potential_ligands <- lr_network %>% 
+  filter(to %in% expressed_receptors) %>% 
+  pull(from) %>% unique()
+
+sender_celltypes <- unique(ln.obj$manual.annotation.fine)
+
+# Use lapply to get the expressed genes of every sender cell type separately here
+list_expressed_genes_sender <- sender_celltypes %>% unique() %>% 
+  lapply(get_expressed_genes, ln.obj, 0.05)
+
+expressed_genes_sender <- list_expressed_genes_sender %>% unlist() %>% unique()
+
+potential_ligands_focused <- intersect(potential_ligands, expressed_genes_sender) 
+
+## Define the gene set of interest
+seurat_obj_receiver <- subset(ln.obj, idents = receiver)
+
+DE_table_receiver <-  FindMarkers(object = seurat_obj_receiver,
+                                  ident.1 = 'low', ident.2 = 'high',
+                                  group.by = "siv.dna.group",
+                                  min.pct = 0.05) %>% rownames_to_column("gene")
+
+geneset_low <- DE_table_receiver %>% 
+  filter(p_val_adj <= 0.1, avg_log2FC < 0) %>% pull(gene)
+
+geneset_low <- geneset_low %>% .[. %in% rownames(ligand_target_matrix)]
+
+## Define the background genes
+background_expressed_genes <- expressed_genes_receiver %>% 
+  .[. %in% rownames(ligand_target_matrix)]
+
+## Perform NicheNet ligand activity analysis
+ligand_activities_all <- predict_ligand_activities(geneset = geneset_low,
+                        background_expressed_genes = background_expressed_genes,
+                        ligand_target_matrix = ligand_target_matrix,
+                        potential_ligands = potential_ligands)
+
+ligand_activities_all <- ligand_activities_all %>% 
+  arrange(-aupr_corrected) %>% mutate(rank = rank(desc(aupr_corrected)))
+
+best_upstream_ligands_all <- ligand_activities_all %>% 
+  top_n(10, aupr_corrected) %>% arrange(-aupr_corrected) %>% pull(test_ligand)
+
+ligand_activities <- ligand_activities %>% 
+  filter(test_ligand %in% potential_ligands_focused)
+
+best_upstream_ligands <- ligand_activities %>% 
+  top_n(10, aupr_corrected) %>% 
+  arrange(-aupr_corrected) %>%
+  pull(test_ligand) %>% unique()
+
+## Ligand AUPR Plot
+ligand_aupr_matrix <- ligand_activities %>% 
+  filter(test_ligand %in% best_upstream_ligands) %>%
+  column_to_rownames("test_ligand") %>% 
+  select(aupr_corrected) %>% arrange(aupr_corrected)
+
+vis_ligand_aupr <- as.matrix(ligand_aupr_matrix, ncol = 1) 
+
+p_ligand_aupr <- make_heatmap_ggplot(vis_ligand_aupr,
+                                     "Prioritized ligands", "Ligand activity", 
+                                     legend_title = "AUPR", color = "darkorange") +
+  theme(axis.text.x.top = element_blank())
+
+p_ligand_aupr
+
+# Target gene plot
+active_ligand_target_links_df <- best_upstream_ligands %>%
+  lapply(get_weighted_ligand_target_links,
+         geneset = geneset_low,
+         ligand_target_matrix = ligand_target_matrix,
+         n = 100) %>%
+  bind_rows() %>% drop_na()
+
+active_ligand_target_links <- prepare_ligand_target_visualization(
+  ligand_target_df = active_ligand_target_links_df,
+  ligand_target_matrix = ligand_target_matrix,
+  cutoff = 0.2) 
+
+order_ligands <- intersect(best_upstream_ligands, 
+                           colnames(active_ligand_target_links)) %>% rev()
+
+order_targets <- active_ligand_target_links_df$target %>% 
+  unique() %>% 
+  intersect(rownames(active_ligand_target_links))
+
+vis_ligand_target <- t(active_ligand_target_links[order_targets,order_ligands])
+
+p_ligand_target <- make_heatmap_ggplot(vis_ligand_target, "Prioritized ligands", 
+                                       "Predicted target genes", color = "purple",
+                                       legend_title = "Regulatory potential") +
+  scale_fill_gradient2(low = "whitesmoke",  high = "purple")
+
+p_ligand_target
+
+## Combined plot
+figures_without_legend <- cowplot::plot_grid(
+  p_ligand_aupr + theme(legend.position = "none"),
+#  p_dotplot + theme(legend.position = "none",
+#                    axis.ticks = element_blank(),
+#                    axis.title.y = element_blank(),
+#                    axis.title.x = element_text(size = 12),
+#                    axis.text.y = element_text(size = 9),
+#                    axis.text.x = element_text(size = 9,  angle = 45, hjust = 0)) +
+#    ylab("Expression in Sender"),
+#  p_lfc + theme(legend.position = "none",
+#                axis.title.y = element_blank()),
+  p_ligand_target + theme(legend.position = "none",
+                          axis.title.y = element_blank()),
+  align = "hv",
+  nrow = 1,
+  rel_widths = c(ncol(vis_ligand_aupr)+6, 
+#                 ncol(vis_ligand_lfc)+7, 
+#                 ncol(vis_ligand_lfc)+8, 
+                 ncol(vis_ligand_target)))
+
+legends <- cowplot::plot_grid(
+    ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_aupr)),
+#    ggpubr::as_ggplot(ggpubr::get_legend(p_dotplot)),
+#    ggpubr::as_ggplot(ggpubr::get_legend(p_lfc)),
+    ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target)),
+    nrow = 1,
+    align = "h", rel_widths = c(1.5, 1, 1, 1))
+
+combined_plot <-  cowplot::plot_grid(figures_without_legend, legends, 
+                                     rel_heights = c(10,5), nrow = 2, align = "hv")
+
+combined_plot
+
+ggsave('results/figures/new/nichenet_combined_plot_CD4_Tfh.pdf',
+       combined_plot)
+
+### CD4 T Naive signature ----
+## Define a set of potential ligands for both the sender-agnostic and sender-focused approach
+receiver = "CD4 T Naive"
+expressed_genes_receiver <- get_expressed_genes(receiver, ln.obj, pct = 0.01)
+
+all_receptors <- unique(lr_network$to)  
+expressed_receptors <- intersect(all_receptors, expressed_genes_receiver)
+potential_ligands <- lr_network %>% 
+  filter(to %in% expressed_receptors) %>% 
+  pull(from) %>% unique()
+
+sender_celltypes <- unique(ln.obj$manual.annotation.fine)
+
+# Use lapply to get the expressed genes of every sender cell type separately here
+list_expressed_genes_sender <- sender_celltypes %>% unique() %>% 
+  lapply(get_expressed_genes, ln.obj, 0.05)
+
+expressed_genes_sender <- list_expressed_genes_sender %>% unlist() %>% unique()
+
+potential_ligands_focused <- intersect(potential_ligands, expressed_genes_sender) 
+
+## Define the gene set of interest
+seurat_obj_receiver <- subset(ln.obj, idents = receiver)
+
+DE_table_receiver <-  FindMarkers(object = ln.obj, only.pos = T,
+                                  ident.1 = 'CD4 T Naive', 
+                                  min.pct = 0.05) %>% rownames_to_column("gene")
+
+geneset_cd4naive <- DE_table_receiver %>% 
+  filter(p_val_adj <= 0.05, avg_log2FC > 0.25) %>% pull(gene)
+
+geneset_cd4naive <- geneset_cd4naive %>% .[. %in% rownames(ligand_target_matrix)]
+
+## Define the background genes
+background_expressed_genes <- expressed_genes_receiver %>% 
+  .[. %in% rownames(ligand_target_matrix)]
+
+## Perform NicheNet ligand activity analysis
+ligand_activities_all <- predict_ligand_activities(geneset = geneset_cd4naive,
+                        background_expressed_genes = background_expressed_genes,
+                        ligand_target_matrix = ligand_target_matrix,
+                        potential_ligands = potential_ligands)
+
+ligand_activities_all <- ligand_activities_all %>% 
+  arrange(-aupr_corrected) %>% mutate(rank = rank(desc(aupr_corrected)))
+
+best_upstream_ligands_all <- ligand_activities_all %>% 
+  top_n(10, aupr_corrected) %>% arrange(-aupr_corrected) %>% pull(test_ligand)
+
+ligand_activities <- ligand_activities %>% 
+  filter(test_ligand %in% potential_ligands_focused)
+
+best_upstream_ligands <- ligand_activities %>% 
+  top_n(10, aupr_corrected) %>% 
+  arrange(-aupr_corrected) %>%
+  pull(test_ligand) %>% unique()
+
+## Ligand AUPR Plot
+ligand_aupr_matrix <- ligand_activities %>% 
+  filter(test_ligand %in% best_upstream_ligands) %>%
+  column_to_rownames("test_ligand") %>% 
+  select(aupr_corrected) %>% arrange(aupr_corrected)
+
+vis_ligand_aupr <- as.matrix(ligand_aupr_matrix, ncol = 1) 
+
+p_ligand_aupr <- make_heatmap_ggplot(vis_ligand_aupr,
+                                     "Prioritized ligands", "Ligand activity", 
+                                     legend_title = "AUPR", color = "darkorange") +
+  theme(axis.text.x.top = element_blank())
+
+p_ligand_aupr
+
+# Target gene plot
+active_ligand_target_links_df <- best_upstream_ligands %>%
+  lapply(get_weighted_ligand_target_links,
+         geneset = geneset_cd4naive,
+         ligand_target_matrix = ligand_target_matrix,
+         n = 100) %>%
+  bind_rows() %>% drop_na()
+
+active_ligand_target_links <- prepare_ligand_target_visualization(
+  ligand_target_df = active_ligand_target_links_df,
+  ligand_target_matrix = ligand_target_matrix,
+  cutoff = 0.2) 
+
+order_ligands <- intersect(best_upstream_ligands, 
+                           colnames(active_ligand_target_links)) %>% rev()
+
+order_targets <- active_ligand_target_links_df$target %>% 
+  unique() %>% 
+  intersect(rownames(active_ligand_target_links))
+
+vis_ligand_target <- t(active_ligand_target_links[order_targets,order_ligands])
+
+p_ligand_target <- make_heatmap_ggplot(vis_ligand_target, "Prioritized ligands", 
+                                       "Predicted target genes", color = "purple",
+                                       legend_title = "Regulatory potential") +
+  scale_fill_gradient2(low = "whitesmoke",  high = "purple")
+
+p_ligand_target
+
+## Combined plot
+figures_without_legend <- cowplot::plot_grid(
+  p_ligand_aupr + theme(legend.position = "none"),
+#  p_dotplot + theme(legend.position = "none",
+#                    axis.ticks = element_blank(),
+#                    axis.title.y = element_blank(),
+#                    axis.title.x = element_text(size = 12),
+#                    axis.text.y = element_text(size = 9),
+#                    axis.text.x = element_text(size = 9,  angle = 45, hjust = 0)) +
+#    ylab("Expression in Sender"),
+#  p_lfc + theme(legend.position = "none",
+#                axis.title.y = element_blank()),
+  p_ligand_target + theme(legend.position = "none",
+                          axis.title.y = element_blank()),
+  align = "hv",
+  nrow = 1,
+  rel_widths = c(ncol(vis_ligand_aupr)+6, 
+#                 ncol(vis_ligand_lfc)+7, 
+#                 ncol(vis_ligand_lfc)+8, 
+                 ncol(vis_ligand_target)))
+
+legends <- cowplot::plot_grid(
+    ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_aupr)),
+#    ggpubr::as_ggplot(ggpubr::get_legend(p_dotplot)),
+#    ggpubr::as_ggplot(ggpubr::get_legend(p_lfc)),
+    ggpubr::as_ggplot(ggpubr::get_legend(p_ligand_target)),
+    nrow = 1,
+    align = "h", rel_widths = c(1.5, 1, 1, 1))
+
+combined_plot <-  cowplot::plot_grid(figures_without_legend, legends, 
+                                     rel_heights = c(10,5), nrow = 2, align = "hv")
+
+combined_plot
+
+ggsave('results/figures/new/nichenet_combined_plot_CD4_Tfh.pdf',
+       combined_plot)
+```
+
 ```{r DEGs all subsets fine annotation}
 ln.obj <- read_rds('data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar_v2.rds')
+
+DefaultAssay(ln.obj) <- 'gene.activity'
+Idents(ln.obj) <- ln.obj$manual.annotation.fine
+cell.markers <- FindAllMarkers(ln.obj, only.pos = T)
+
+cell.markers <- cell.markers |> 
+  filter(p_val_adj < 0.05, avg_log2FC >0.25)
 
 DefaultAssay(ln.obj) <- 'gene.activity'
 Idents(ln.obj) <- ln.obj$manual.annotation.fine
@@ -2767,8 +3472,8 @@ for(i in 1:length(idents)) {
 }
 names(degs.list) <- idents
 
-degs.df <- bind_rows(degs.list, .id = 'cluster') |> 
-  rownames_to_column('genesymbol') |> 
+degs.df <- bind_rows(degs.list, .id = 'cluster') |>  
+  rownames_to_column('genesymbol') 
   mutate(genesymbol = sub('\\..*', '', genesymbol)) |> 
   filter(p_val_adj < 0.1)
 
@@ -2796,6 +3501,17 @@ gene_set_h_manual <- msigdbr::msigdbr(category = 'H') %>%
   bind_rows(ec_mono_geneset) |> 
   unique()
 
+gene_set_c3 <-msigdbr::msigdbr(category = 'C3')  |> 
+  filter(grepl('TFT:TFT_Legacy', gs_subcat)) |> 
+  select(gs_name, gene_symbol) %>%
+  unique()
+
+net <- decoupleR::get_dorothea(levels = c('A', 'B', 'C', 'D'))
+
+gene_set_dorothea <- net |> 
+  filter(mor > 0, confidence %in% c('A', 'B', 'C')) |> 
+  select(source, target)
+
 # ORA
 gene.list.up <- list()
 gene.list.down <- list()
@@ -2820,14 +3536,14 @@ gene.list.up <- compact(gene.list.up)
 gene.list.down <- compact(gene.list.down)
 
 ora.list.up <- compareCluster(gene.list.up, fun = 'enricher', 
-                              TERM2GENE = gene_set_h_manual, 
+                              TERM2GENE = gene_set_dorothea, 
                               universe = rownames(ln.obj))
 
 #write_tsv(ora.list.up@compareClusterResult, 
 #          'results/figures/new/ORA_Tcells_Low_vs_High_SIVDNA_up.tsv')
 
 ora.list.down <- compareCluster(gene.list.down, fun = 'enricher', 
-                                TERM2GENE = gene_set_h_manual,
+                                TERM2GENE = gene_set_dorothea,
                                 universe = rownames(ln.obj))
 
 #write_tsv(ora.list.down@compareClusterResult, 
@@ -3225,6 +3941,330 @@ ora.list.up <- compareCluster(gene.list.up, fun = 'enricher',
 ora.list.down <- compareCluster(gene.list.down, fun = 'enricher', 
                                 TERM2GENE = gene_set_h_manual,
                                 universe = rownames(ln.obj))
+
+```
+
+```{r Macrophages}
+myeloid.obj <- readRDS('data/processed/new/myeloid_integrated.rds')
+
+macro <- subset(myeloid.obj, manual.annotation.fine == 'Macrophages')
+
+
+DefaultAssay(macro) <- 'peaks'
+## ATAC
+macro <- FindTopFeatures(macro, min.cutoff = 5) %>% 
+  RunTFIDF() %>% 
+  RunSVD()
+
+DepthCor(macro)
+
+macro <- RunUMAP(macro, reduction = 'lsi', dims = 2:10, 
+                 reduction.name = "umap.atac", reduction.key = "atacUMAP_")
+
+DimPlot(macro, group.by = 'animal', reduction = 'umap.atac')
+
+# GEX
+DefaultAssay(macro) <- 'RNA'
+macro <- NormalizeData(macro) %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+ElbowPlot(macro)
+
+macro <- RunUMAP(macro, dims = 1:10, reduction.name = 'umap.rna', 
+              reduction.key = 'rnaUMAP_')
+
+DimPlot(macro, group.by = 'animal', reduction = 'umap.rna')
+
+### WNN
+DefaultAssay(macro) <- 'RNA'
+
+macro <- FindMultiModalNeighbors(macro, reduction.list = list("pca", "lsi"), 
+                                dims.list = list(1:10, 2:10),
+                                verbose = TRUE)
+
+# build a joint UMAP visualization
+macro <- RunUMAP(macro, nn.name = "weighted.nn", reduction.name = "wnn.umap",
+                 reduction.key = "wnnUMAP_", verbose = TRUE)
+
+DimPlot(macro, reduction = 'wnn.umap', group.by = 'animal')
+
+DimPlot(macro, reduction = 'wnn.umap', 
+        group.by = 'animal', split.by = 'animal', ncol = 4)
+
+### Reclustering
+macro <- FindClusters(macro, graph.name = "wsnn", 
+                      algorithm = 3, verbose = FALSE, resolution = 0.5)
+
+DimPlot(macro, reduction = 'wnn.umap', label = T, 
+        label.box = T, repel = T) + NoLegend()
+
+#### Check markers
+myeloid.markers <- readxl::read_excel('data/raw/human.cell.surface.markers.xlsx',
+                                     sheet = 'myeloid.subsets')
+
+
+
+macrophage.cluster.umap <- DimPlot(macro, reduction = 'wnn.umap', label = T, 
+        label.box = T, repel = T) + NoLegend()
+
+#ggsave('results/figures/new/umap_macrophage_clusters.png', 
+#       macrophage.cluster.umap, scale = 0.4, dpi = 'retina', bg = 'white')
+
+macrophage.markers <- c('CD14', 'CD68', 'CD86', 'CD80', 'NOS2', 'CD163', 'MRC1', 
+                        'VSIG4', 'IL10',  'IFNG', 'IDO1', 'TNF')
+
+macrophage_markers_expression <- FeaturePlot(macro, features = macrophage.markers, 
+                                             ncol= 4, max.cutoff = 'q90', reduction = 'wnn.umap')
+
+ggsave('results/figures/new/umap_macrophage_markers_expression.png', 
+       macrophage_markers_expression, scale = 1, dpi = 'retina', bg = 'white')
+
+```
+
+```{r Peak recalling low vs high}
+ln.obj <- readRDS('data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar_v2.rds')
+
+ln.obj.highsiv <- subset(ln.obj, siv.dna.group == 'high')
+ln.obj.lowsiv <- subset(ln.obj, siv.dna.group == 'low')
+
+### High ----
+### Peak re-Calling
+DefaultAssay(ln.obj.highsiv) <- "peaks"
+
+FilterCells(
+  fragments = "data/raw/multiome/atac_fragments.tsv.gz",
+  cells = rownames(ln.obj.highsiv@meta.data),
+  outfile = "data/processed/new/atac_fragments_ln.sivhigh.filtered.tsv.gz",
+  verbose = TRUE
+)
+
+#Change location of 'fragments' in multiome Seurat file
+Fragments(ln.obj.highsiv@assays$peaks) <- NULL
+fragments <- CreateFragmentObject(path = 
+                "data/processed/new/atac_fragments_ln.sivhigh.filtered.tsv.gz", 
+                                  cells = colnames(ln.obj.highsiv), 
+                                  validate.fragments = TRUE)
+
+Fragments(ln.obj.highsiv@assays$peaks) <- fragments
+
+# Call peaks using MACS2
+peaks <- CallPeaks(ln.obj.highsiv,
+                   macs2.path = '/Users/ftencat/opt/anaconda3/bin/macs2',
+                   group.by = "manual.annotation.fine")
+
+# Remove peaks on nonstandard chromosomes 
+library(GenomeInfoDb)
+peaks <- keepStandardChromosomes(peaks, pruning.mode = "coarse")
+
+# Save peaks file
+dir.create("data/processed/new/peaks")
+save(peaks, file = "data/processed/new/peaks/peaks_ln_sivdnahigh.RData")
+
+# Quantify counts in each peak
+macs2_counts <- FeatureMatrix(
+  fragments = Fragments(ln.obj.highsiv),
+  features = peaks,
+  cells = colnames(ln.obj.highsiv)
+)
+
+#library(EnsDb.Hsapiens.v86)
+#annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+#seqlevelsStyle(annotations) <- 'UCSC'
+#genome(annotations) <- "hg38"
+
+library(AnnotationHub)
+ah <- AnnotationHub()
+qr <- query(ah, c("EnsDb", "mulatta", "109"))
+edb <- qr[[1]]
+annotations <- GetGRangesFromEnsDb(ensdb = edb)
+seqlevelsStyle(annotations) <- 'NCBI'
+genome(annotations) <- "Mmul_10"
+
+fragpath = "data/processed/new/atac_fragments_ln.sivhigh.filtered.tsv.gz"
+
+# Create a new assay using the MACS2 peak set and add it to the pbmc object
+ln.obj.highsiv[["peaks.high"]] <- CreateChromatinAssay(
+  counts = macs2_counts,
+  fragments = fragpath,
+  annotation = annotations
+)
+
+DefaultAssay(ln.obj.highsiv) <- 'peaks.high'
+#saveRDS(ln.obj.highsiv, 'data/processed/new/ln.peak.recalling_sivdna_high.rds')
+ln.obj.highsiv <- readRDS('data/processed/new/ln.peak.recalling_sivdna_high.rds')
+
+all_dar.gr <- StringToGRanges(rownames(ln.obj.highsiv), sep = c(":","-"))
+
+all.peakAnno <- ChIPseeker::annotatePeak(all_dar.gr, TxDb = edb,
+                       tssRegion = c(-3000, 3000), verbose = FALSE)
+
+ChIPseeker::plotAnnoPie(all.peakAnno, main = 'high SIVDNA RMs', line = -2) 
+
+### Low SIV DNA ----
+### Peak re-Calling
+DefaultAssay(ln.obj.lowsiv) <- "peaks"
+
+FilterCells(
+  fragments = "data/raw/multiome/atac_fragments.tsv.gz",
+  cells = rownames(ln.obj.lowsiv@meta.data),
+  outfile = "data/processed/new/atac_fragments_ln.sivlow.filtered.tsv.gz",
+  verbose = TRUE
+)
+
+#Change location of 'fragments' in multiome Seurat file
+Fragments(ln.obj.lowsiv@assays$peaks) <- NULL
+fragments <- CreateFragmentObject(path = 
+                "data/processed/new/atac_fragments_ln.sivlow.filtered.tsv.gz", 
+                                  cells = colnames(ln.obj.lowsiv), 
+                                  validate.fragments = TRUE)
+
+Fragments(ln.obj.lowsiv@assays$peaks) <- fragments
+
+# Call peaks using MACS2
+peaks <- CallPeaks(ln.obj.lowsiv,
+                   macs2.path = '/Users/ftencat/opt/anaconda3/bin/macs2',
+                   group.by = "manual.annotation.fine")
+
+# Remove peaks on nonstandard chromosomes 
+library(GenomeInfoDb)
+peaks <- keepStandardChromosomes(peaks, pruning.mode = "coarse")
+
+# Save peaks file
+dir.create("data/processed/new/peaks")
+save(peaks, file = "data/processed/new/peaks/peaks_ln_sivdnalow.RData")
+
+# Quantify counts in each peak
+macs2_counts <- FeatureMatrix(
+  fragments = Fragments(ln.obj.lowsiv),
+  features = peaks,
+  cells = colnames(ln.obj.lowsiv)
+)
+
+#library(EnsDb.Hsapiens.v86)
+#annotations <- GetGRangesFromEnsDb(ensdb = EnsDb.Hsapiens.v86)
+#seqlevelsStyle(annotations) <- 'UCSC'
+#genome(annotations) <- "hg38"
+
+library(AnnotationHub)
+ah <- AnnotationHub()
+qr <- query(ah, c("EnsDb", "mulatta", "109"))
+edb <- qr[[1]]
+annotations <- GetGRangesFromEnsDb(ensdb = edb)
+seqlevelsStyle(annotations) <- 'NCBI'
+genome(annotations) <- "Mmul_10"
+
+fragpath = "data/processed/new/atac_fragments_ln.sivlow.filtered.tsv.gz"
+
+# Create a new assay using the MACS2 peak set and add it to the pbmc object
+ln.obj.lowsiv[["peaks.low"]] <- CreateChromatinAssay(
+  counts = macs2_counts,
+  fragments = fragpath,
+  annotation = annotations
+)
+
+DefaultAssay(ln.obj.lowsiv) <- 'peaks.low'
+#saveRDS(ln.obj.lowsiv, 'data/processed/new/ln.peak.recalling_sivdna_low.rds')
+#ln.obj.lowsiv <- readRDS('data/processed/new/ln.peak.recalling_sivdna_low.rds')
+
+library(AnnotationHub)
+ah <- AnnotationHub()
+qr <- query(ah, c("EnsDb", "mulatta", "109"))
+edb <- qr[[1]]
+
+all_dar.gr <- StringToGRanges(rownames(ln.obj.lowsiv), sep = c(":","-"))
+
+all.peakAnno <- ChIPseeker::annotatePeak(all_dar.gr, TxDb = edb,
+                       tssRegion = c(-3000, 3000), verbose = FALSE)
+
+ChIPseeker::plotAnnoPie(all.peakAnno, main = 'low SIVDNA RMs', line = -2) 
+
+
+
+###### Count peaks per animal
+ln.obj <- readRDS('data/processed/new/ln.integrated.fine.annot.geneactivity.chromvar_v2.rds')
+
+DefaultAssay(ln.obj) <- "peaks"
+ln.obj.clean <- DietSeurat(ln.obj, assays = 'peaks')
+
+obj.list <- SplitObject(ln.obj.clean, split.by = "animal")
+
+obj.list.down <- lapply(obj.list, function(x) {
+  set.seed(42)
+  x[, sample(colnames(x), size = 5000, replace = F)]})
+
+peaks.list <- list()
+for(i in seq_along(obj.list.down)) {
+
+peaks.list[[i]] <- CallPeaks(obj.list.down[[i]],
+                        macs2.path = '/Users/ftencat/opt/anaconda3/bin/macs2',
+                        group.by = "manual.annotation")
+
+peaks.list[[i]] <- keepStandardChromosomes(peaks.list[[i]], pruning.mode = "coarse")
+
+#save(peaks.list[[i]], file = paste0("data/processed/new/peaks/peaks_", 
+#                                    names(obj.list.down)[i], ".RData"))
+}
+
+names(peaks.list) <- names(obj.list.down)
+
+#save(peaks.list, file = "data/processed/new/peaks/peaks_per_animal.RData")
+
+
+peak.count.df <- bind_rows(lapply(peaks.list, as.data.frame), .id = 'animal') |> 
+  separate_longer_delim(peak_called_in, delim = ',') |>
+  group_by(animal) |> 
+  count(peak_called_in) |> 
+  mutate(siv.dna.group = case_when(animal %in% c('RYm17', 'RFl17', 'RBf17') ~ 'high',
+                                   animal %in% c('RWs17', 'RRh17', 'RBv17', "RNy16") ~ 'low')) |> 
+  ungroup() |> 
+  dplyr::rename(manual.annotation = peak_called_in, n.peak = n) 
+
+peak.stat <- peak.count.df |> 
+  group_by(manual.annotation) |> 
+  wilcox_test(n.peak ~ siv.dna.group)
+
+peak.number.plot <- peak.count.df |> 
+  ggplot(aes(x = siv.dna.group, y = n.peak)) +
+  stat_summary( fun.y="median", geom="crossbar")  +
+  geom_point(size = 2, shape = 21, aes(fill = animal)) +
+  facet_wrap(~manual.annotation, scales = 'free_y') +
+  stat_compare_means(method = 'wilcox.test', label = 'p.format', vjust = -1) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.3))) +
+  ylab('# peaks') +
+  ggtitle('# Peaks per animal')
+
+#ggsave('results/figures/new/peak_number_per_celltype_group.pdf', peak.number.plot,
+#        width = 7.5, height = 7)
+
+cell.count.df <- bind_rows(lapply(obj.list.down, function(x) {x@meta.data})) |> 
+  group_by(animal) |> 
+  count(manual.annotation) |> 
+  mutate(siv.dna.group = case_when(animal %in% c('RYm17', 'RFl17', 'RBf17') ~ 'high',
+                                   animal %in% c('RWs17', 'RRh17', 'RBv17', "RNy16") ~ 'low')) |> 
+  ungroup() |> 
+  mutate(manual.annotation = gsub(' ', '_', manual.annotation)) |> 
+  mutate(manual.annotation = gsub('/', '_', manual.annotation))
+  
+peak.number.plot <- cell.count.df |>
+  ggplot(aes(x = siv.dna.group, y = n)) +
+  stat_summary( fun.y="median", geom="crossbar")  +
+  geom_point(size = 2, shape = 21, aes(fill = animal)) +
+  facet_wrap(~manual.annotation, scales = 'free_y') +
+  stat_compare_means(method = 'wilcox.test', label = 'p.format', vjust = -1) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.3))) +
+  ylab('# Cells') +
+  ggtitle('# Cells per animal')
+
+ggsave('results/figures/new/number_cell_per_animal.pdf', peak.number.plot,
+        width = 7.5, height = 7)
+
+x <- cell.count.df |> 
+  left_join(peak.count.df |> select(animal, manual.annotation, n.peak)) |> 
+  mutate(norm.peak = n.peak/n) |> 
+  group_by(manual.annotation) |> 
+  wilcox_test(norm.peak ~ siv.dna.group)
 
 ```
 
