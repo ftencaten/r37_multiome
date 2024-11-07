@@ -147,9 +147,11 @@ sivrna.sivdna.selected.animals <- ipda %>%
              y = `LOG_SIV/DNA_LN_per10^6correctedCD4Live`)) +
     geom_point(aes(colour = group), size = 3) +
     geom_smooth(method = 'lm', se = F) +
+  geom_vline(xintercept = 4, linetype = 2) +
+  geom_hline(yintercept = 2, linetype = 2) +
   geom_label_repel(data = ipda %>% 
                      filter(`WkPost-ATI` == 24, animal %in% multiome_animals),
-                   aes(label = animal), min.segment.length = 0)+
+                   aes(label = animal), min.segment.length = 0, size = 3)+
     stat_cor(aes(label = paste(paste("'rho'", ..r.., sep = "~`=`~"), 
                                ..p.label.., sep = "~`,`~")),
              method = 'spearman', size = 5, cor.coef.name = 'rho',
@@ -157,13 +159,26 @@ sivrna.sivdna.selected.animals <- ipda %>%
     scale_color_manual(values = c('red','blue', 'black'), name = 'Group') +
     labs(x = 'Log CA-vRNA - LN\nWeek 24 post-ATI',
          y = 'Log CA-vDNA - LN\nWeek 24 post-ATI')+
-    theme_prism() +
-  theme(legend.title = element_text())
+  annotation_custom(textGrob(bquote(~CA-vDNA^lo), rot = 270,
+                             gp = gpar(fontsize = 14, fontface="bold", col = 'green4')), 
+                   xmax = 15, ymin = 1, ymax = 2.3) +
+  annotation_custom(textGrob(bquote(~CA-vDNA^hi), rot = 270,
+                             gp = gpar(fontsize = 14, fontface="bold", col = 'red2')), 
+                   xmax = 15, ymin = 3.5, ymax = 4.5) +
+  annotation_custom(textGrob(bquote(~CA-vRNA^hi), 
+                             gp = gpar(fontsize = 14, fontface="bold", col = 'red2')), 
+                   xmin = 6, xmax = 7,  ymax = 8.3) +
+  annotation_custom(textGrob(bquote(~CA-vRNA^lo), 
+                             gp = gpar(fontsize = 14, fontface="bold", col = 'green4')), 
+                   xmin = 2, xmax = 3,  ymax = 8.3) +
+  theme_prism() +
+  theme(legend.title = element_text(), plot.margin = unit(c(2,0.5,0.5,0.5), "lines")) +
+  coord_cartesian(clip = 'off')
 
 sivrna.sivdna.selected.animals
 
-#ggsave('results/figures/correlation_sivdna_sivrna_selected_animals_multiome.pdf',
-#       sivrna.sivdna.selected.animals, device = 'pdf', scale = 0.7)
+ggsave('results/figures/correlation_sivdna_sivrna_selected_animals_multiome.pdf',
+       sivrna.sivdna.selected.animals, device = 'pdf', width = 7, height = 5)
 
 sivdna.2ltr.selected.animals  
 ipda %>% 
