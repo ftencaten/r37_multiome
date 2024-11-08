@@ -2212,6 +2212,7 @@ Idents(myeloid.obj) <- myeloid.obj$manual.annotation.fine
 motif.list <- list()
 idents <- levels(Idents(myeloid.obj))
 
+
 for(i in seq_along(idents)) {
     motif.list[[i]] <- FindMarkers(myeloid.obj, 
                                   ident.1 = "low", 
